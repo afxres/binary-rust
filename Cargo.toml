@@ -1,0 +1,10 @@
+[package]
+name = "binary"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[[test]]
+name = "allocator"
+path = "tests/allocator/lib.rs"
