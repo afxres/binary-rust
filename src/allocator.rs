@@ -1,25 +1,5 @@
-use std::{alloc::Layout, error::Error, fmt};
-
-#[derive(Debug, Clone)]
-pub enum AllocatorError {
-    CapacityError,
-    OutOfMemory,
-}
-
-impl Error for AllocatorError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
-    }
-}
-
-impl fmt::Display for AllocatorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AllocatorError::CapacityError => write!(f, "allocator capacity error"),
-            AllocatorError::OutOfMemory => write!(f, "out of memory"),
-        }
-    }
-}
+use crate::internal::error_helper;
+use std::alloc::Layout;
 
 pub struct Allocator {
     allocated: bool,
@@ -52,7 +32,7 @@ impl Allocator {
         self.limits
     }
 
-    fn resize(&mut self, length: usize) -> Result<(), AllocatorError> {
+    fn resize(&mut self, length: usize) -> Result<(), Box<dyn std::error::Error>> {
         assert!(self.limits <= i32::MAX as usize);
         assert!(self.bounds <= self.limits);
         assert!(self.offset <= self.bounds);
@@ -62,7 +42,7 @@ impl Allocator {
         let limits = self.limits;
         let amount = offset as u64 + length as u64;
         if length > i32::MAX as usize || amount > limits as u64 {
-            return Err(AllocatorError::CapacityError);
+            return Err(error_helper::error_allocator_max_capacity_overflow());
         }
 
         let source = self.bounds;
@@ -82,7 +62,7 @@ impl Allocator {
         let bounds = cursor as usize;
         let target = unsafe { std::alloc::alloc(Layout::from_size_align(bounds, 1).unwrap()) };
         if target.is_null() {
-            return Err(AllocatorError::OutOfMemory);
+            return Err(error_helper::error_allocator_allocate_failed());
         }
         if self.allocated {
             assert!(self.buffer.is_null() == false);
@@ -96,7 +76,7 @@ impl Allocator {
         Ok(())
     }
 
-    pub fn ensure(&mut self, length: usize) -> Result<(), AllocatorError> {
+    pub fn ensure(&mut self, length: usize) -> Result<(), Box<dyn std::error::Error>> {
         assert!(self.bounds <= i32::MAX as usize);
         assert!(self.offset <= self.bounds);
         if length > i32::MAX as usize || self.offset as u64 + length as u64 > self.bounds as u64 {
@@ -107,15 +87,15 @@ impl Allocator {
         Ok(())
     }
 
-    fn assign(&mut self, length: usize) -> Result<*mut u8, AllocatorError> {
+    fn assign(&mut self, length: usize) -> Result<*mut u8, Box<dyn std::error::Error>> {
         assert!(length != 0);
         self.ensure(length)?;
         let offset = self.offset;
         self.offset = offset + length;
-        return Ok(unsafe { self.buffer.add(offset) });
+        Ok(unsafe { self.buffer.add(offset) })
     }
 
-    pub fn append(&mut self, span: &[u8]) -> Result<(), AllocatorError> {
+    pub fn append(&mut self, span: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         if span.is_empty() {
             return Ok(());
         }
@@ -137,8 +117,8 @@ impl Drop for Allocator {
     }
 }
 
-impl fmt::Display for Allocator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for Allocator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "length = {}, capacity = {}, max capacity = {}", self.length(), self.capacity(), self.max_capacity())
     }
 }
@@ -150,6 +130,12 @@ where
     type Output = Index::Output;
 
     fn index(&self, index: Index) -> &Self::Output {
-        if self.offset == 0 { &[][index] } else { &(unsafe { std::slice::from_raw_parts(self.buffer, self.offset) })[index] }
+        if self.offset == 0 {
+            assert!(self.buffer.is_null());
+            return &[][index];
+        } else {
+            assert!(self.buffer.is_null() == false);
+            return &(unsafe { std::slice::from_raw_parts(self.buffer, self.offset) })[index];
+        }
     }
 }

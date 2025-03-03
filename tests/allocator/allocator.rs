@@ -1,4 +1,4 @@
-use binary::{self, Allocator};
+use binary::{self, allocator::Allocator};
 use std::error::Error;
 
 #[test]

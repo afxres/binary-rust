@@ -1,4 +1,9 @@
-pub mod allocator;
+pub(crate) mod internal;
 
-pub use allocator::Allocator;
-pub use allocator::AllocatorError;
+pub mod allocator;
+pub mod converter;
+
+pub trait Converter {
+    fn length(&self) -> usize;
+    fn generic_argument(&self) -> std::any::TypeId;
+}
