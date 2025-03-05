@@ -1,4 +1,4 @@
-use crate::internal::error_helper;
+use crate::internal::{error_helper, length};
 use std::alloc::Layout;
 
 pub struct Allocator {
@@ -10,6 +10,9 @@ pub struct Allocator {
 }
 
 impl Allocator {
+    const ANCHOR_SIZE: usize = 4;
+    const ANCHOR_SHRINK_LIMITS: usize = 16;
+
     pub fn new() -> Self {
         Self {
             allocated: false,
@@ -80,19 +83,50 @@ impl Allocator {
         assert!(self.bounds <= i32::MAX as usize);
         assert!(self.offset <= self.bounds);
         if length > i32::MAX as usize || self.offset as u64 + length as u64 > self.bounds as u64 {
-            self.resize(length)?
+            self.resize(length)?;
         }
         assert!(self.bounds <= self.limits);
         assert!(self.bounds >= self.offset + length);
         Ok(())
     }
 
-    fn assign(&mut self, length: usize) -> Result<*mut u8, Box<dyn std::error::Error>> {
+    pub(crate) fn assign(&mut self, length: usize) -> Result<*mut u8, Box<dyn std::error::Error>> {
         assert!(length != 0);
         self.ensure(length)?;
         let offset = self.offset;
         self.offset = offset + length;
         Ok(unsafe { self.buffer.add(offset) })
+    }
+
+    pub(crate) fn anchor(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
+        self.ensure(Self::ANCHOR_SIZE)?;
+        let offset = self.offset;
+        self.offset = offset + Self::ANCHOR_SIZE;
+        Ok(offset)
+    }
+
+    pub(crate) fn finish_anchor(&mut self, anchor: usize) -> Result<(), Box<dyn std::error::Error>> {
+        assert!(self.bounds <= i32::MAX as usize);
+        assert!(self.offset <= self.bounds);
+        let offset = self.offset;
+        let refers = anchor as u64 + Self::ANCHOR_SIZE as u64;
+        if anchor > i32::MAX as usize || refers > offset as u64 {
+            return Err(error_helper::error_allocator_invalid());
+        }
+        let length = offset - refers as usize;
+        let target = unsafe { self.buffer.add(anchor) };
+        if length <= Self::ANCHOR_SHRINK_LIMITS {
+            self.offset = offset - 3;
+            unsafe { length::encode_length_prefix(target, length, 1) };
+            unsafe { std::ptr::copy(target.add(4), target.add(1), length) };
+            assert!(self.offset >= 1);
+            assert!(self.offset <= self.bounds);
+        } else {
+            unsafe { length::encode_length_prefix(target, length, 4) };
+            assert!(self.offset >= 4);
+            assert!(self.offset <= self.bounds);
+        }
+        Ok(())
     }
 
     pub fn append(&mut self, span: &[u8]) -> Result<(), Box<dyn std::error::Error>> {

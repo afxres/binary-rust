@@ -1,4 +1,4 @@
-use binary::{allocator::Allocator, converter::Converter};
+use binary::{allocator::Allocator, converter, converter::Converter};
 
 struct CustomConstantConverter<T: 'static> {
     _t: std::marker::PhantomData<T>,
@@ -46,9 +46,30 @@ fn auto_methods_with_data<T: Eq + std::fmt::Debug + 'static>(source: T, expected
     Ok(())
 }
 
+fn length_prefix_methods_with_data<T: Eq + std::fmt::Debug + 'static>(source: T, expected: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut allocator = Allocator::new();
+    let converter = CustomConstantConverter::<T>::new();
+    converter.encode_with_length_prefix(&mut allocator, &source)?;
+    let mut bytes_expected = vec![0u8; 4];
+    let mut bytes_written = 0usize;
+    converter::encode_direct(&mut bytes_expected, std::mem::size_of::<T>(), &mut bytes_written)?;
+    bytes_expected.resize(bytes_written, 0);
+    bytes_expected.extend_from_slice(expected);
+    assert_eq!(allocator.length(), bytes_expected.len());
+    assert_eq!(allocator[..], bytes_expected[..]);
+    Ok(())
+}
+
 #[test]
 fn auto_methods() -> Result<(), Box<dyn std::error::Error>> {
     auto_methods_with_data(42i32, &42i32.to_ne_bytes())?;
     auto_methods_with_data(97i64, &97i64.to_ne_bytes())?;
+    Ok(())
+}
+
+#[test]
+fn length_prefix_methods() -> Result<(), Box<dyn std::error::Error>> {
+    length_prefix_methods_with_data(127u32, &127u32.to_ne_bytes())?;
+    length_prefix_methods_with_data(768u64, &768u64.to_ne_bytes())?;
     Ok(())
 }

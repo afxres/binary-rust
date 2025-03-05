@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-unsafe fn encode_le_unaligned<T>(target: *mut u8, item: T) {
+pub(crate) unsafe fn encode_le_unaligned<T>(target: *mut u8, item: T) {
     match std::mem::size_of::<T>() {
         1 => unsafe { target.write_unaligned(*(std::ptr::from_ref(&item).cast::<u8>())) },
         2 => unsafe { target.cast::<u16>().write_unaligned((*(std::ptr::from_ref(&item).cast::<u16>())).to_le()) },
@@ -10,7 +10,7 @@ unsafe fn encode_le_unaligned<T>(target: *mut u8, item: T) {
     }
 }
 
-unsafe fn encode_be_unaligned<T>(target: *mut u8, item: T) {
+pub(crate) unsafe fn encode_be_unaligned<T>(target: *mut u8, item: T) {
     match std::mem::size_of::<T>() {
         1 => unsafe { target.write_unaligned(*(std::ptr::from_ref(&item).cast::<u8>())) },
         2 => unsafe { target.cast::<u16>().write_unaligned((*(std::ptr::from_ref(&item).cast::<u16>())).to_be()) },
