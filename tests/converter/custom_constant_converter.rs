@@ -57,6 +57,10 @@ fn length_prefix_methods_with_data<T: Eq + std::fmt::Debug + 'static>(source: T,
     bytes_expected.extend_from_slice(expected);
     assert_eq!(allocator.length(), bytes_expected.len());
     assert_eq!(allocator[..], bytes_expected[..]);
+    let mut span = &allocator[..];
+    let actual = converter.decode_with_length_prefix(&mut span)?;
+    assert_eq!(actual, source);
+    assert_eq!(span.len(), 0);
     Ok(())
 }
 

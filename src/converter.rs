@@ -3,7 +3,6 @@ use crate::{
     internal::{error_helper, length},
 };
 
-#[allow(unused)]
 pub trait Converter<T>: crate::Converter {
     fn encode(&self, allocator: &mut Allocator, item: &T) -> Result<(), Box<dyn std::error::Error>>;
 
@@ -35,7 +34,7 @@ pub trait Converter<T>: crate::Converter {
     }
 
     fn decode_with_length_prefix(&self, span: &mut &[u8]) -> Result<T, Box<dyn std::error::Error>> {
-        todo!()
+        self.decode(&decode_with_length_prefix(span)?)
     }
 }
 
@@ -56,4 +55,28 @@ pub fn encode_direct(span: &mut [u8], number: usize, bytes_written: &mut usize) 
     unsafe { length::encode_length_prefix(span.as_mut_ptr(), number, prefix_length) };
     *bytes_written = prefix_length;
     Ok(())
+}
+
+pub fn decode(span: &mut &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
+    let source = span.as_ptr();
+    let mut offset = 0usize;
+    let length = unsafe { length::decode_length_prefix(source, &mut offset, span.len())? };
+    assert!(offset == 1 || offset == 4);
+    assert!(offset <= span.len());
+    *span = &span[offset..];
+    return Ok(length);
+}
+
+pub fn decode_with_length_prefix<'a>(span: &'a mut &[u8]) -> Result<&'a [u8], Box<dyn std::error::Error>> {
+    let source = span.as_ptr();
+    let mut offset = 0usize;
+    let length = unsafe { length::decode_length_prefix(source, &mut offset, span.len())? };
+    assert!(offset == 1 || offset == 4);
+    assert!(offset <= span.len());
+    if span.len() < offset + length {
+        return Err(error_helper::error_not_enough_bytes());
+    }
+    let result = unsafe { std::slice::from_raw_parts(source.add(offset), length) };
+    *span = &span[(offset + length)..];
+    Ok(result)
 }
