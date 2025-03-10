@@ -25,9 +25,11 @@ pub trait Converter<T>: crate::Converter {
 
     fn decode_auto(&self, span: &mut &[u8]) -> Result<T, Box<dyn std::error::Error>> {
         if self.length() != 0 {
-            let (head, tail) = span.split_at_checked(self.length()).ok_or(error_helper::error_not_enough_bytes())?;
-            *span = tail;
-            return self.decode(&head);
+            if let Some((head, tail)) = span.split_at_checked(self.length()) {
+                *span = tail;
+                return self.decode(&head);
+            }
+            return Err(error_helper::error_not_enough_bytes());
         } else {
             return self.decode_with_length_prefix(span);
         }
@@ -63,7 +65,7 @@ pub fn decode(span: &mut &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
     let length = unsafe { length::decode_length_prefix(source, &mut offset, span.len())? };
     assert!(offset == 1 || offset == 4);
     assert!(offset <= span.len());
-    *span = &span[offset..];
+    *span = unsafe { span.get_unchecked(offset..) };
     return Ok(length);
 }
 
@@ -77,6 +79,6 @@ pub fn decode_with_length_prefix<'a>(span: &'a mut &[u8]) -> Result<&'a [u8], Bo
         return Err(error_helper::error_not_enough_bytes());
     }
     let result = unsafe { std::slice::from_raw_parts(source.add(offset), length) };
-    *span = &span[(offset + length)..];
+    *span = unsafe { span.get_unchecked((offset + length)..) };
     Ok(result)
 }

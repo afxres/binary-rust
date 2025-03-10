@@ -27,7 +27,7 @@ impl<T> Converter<T> for CustomConstantConverter<T> {
 
     fn decode(&self, span: &&[u8]) -> Result<T, Box<dyn std::error::Error>> {
         let part = span.split_at_checked(std::mem::size_of::<T>());
-        let head = part.ok_or(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "not enough bytes.")))?.0;
+        let head = part.ok_or(Box::<dyn std::error::Error>::from("not enough bytes for custom constant type."))?.0;
         Ok(unsafe { head.as_ptr().cast::<T>().read_unaligned() })
     }
 }
@@ -76,4 +76,16 @@ fn length_prefix_methods() -> Result<(), Box<dyn std::error::Error>> {
     length_prefix_methods_with_data(127u32, &127u32.to_ne_bytes())?;
     length_prefix_methods_with_data(768u64, &768u64.to_ne_bytes())?;
     Ok(())
+}
+
+#[test]
+fn decode_auto_not_enough_bytes() {
+    let converter = CustomConstantConverter::<u16>::new();
+    let buffer = [0u8; 1];
+    let mut span = &buffer[..];
+    let result = converter.decode_auto(&mut span);
+    let binding = result.unwrap_err();
+    let error = binding.downcast_ref::<std::io::Error>().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(error.to_string(), "not enough bytes.")
 }
