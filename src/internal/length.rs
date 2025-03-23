@@ -21,9 +21,9 @@ pub(crate) unsafe fn encode_length_prefix(buffer: *mut u8, number: usize, length
     assert!(length == 1 || length == 4);
     assert!(length >= encode_length_prefix_length(number));
     if length == 1 {
-        unsafe { endian::encode_be_unaligned(buffer, number as u8) };
+        unsafe { endian::encode_be_unaligned(buffer, &(number as u8)) };
     } else {
-        unsafe { endian::encode_be_unaligned(buffer, number as u32 | 0x8000_0000) };
+        unsafe { endian::encode_be_unaligned(buffer, &(number as u32 | 0x8000_0000)) };
     }
 }
 
