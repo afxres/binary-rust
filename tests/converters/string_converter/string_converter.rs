@@ -1,4 +1,4 @@
-use binary::{Converter, allocator::Allocator, converter, converters::string_converter::StringConverter};
+use binary::{allocator::Allocator, converter, converters::string_converter::StringConverter, interface::Converter};
 
 fn base_methods_with_data(source: std::string::String, expected: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     let mut allocator = Allocator::new();

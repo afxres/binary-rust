@@ -8,7 +8,7 @@ impl StringConverter {
     }
 }
 
-impl crate::Converter for StringConverter {
+impl crate::interface::Converter for StringConverter {
     fn length(&self) -> usize {
         0
     }
