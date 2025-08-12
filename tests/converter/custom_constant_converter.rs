@@ -10,7 +10,7 @@ impl<T> CustomConstantConverter<T> {
     }
 }
 
-impl<T> binary::interface::Converter for CustomConstantConverter<T> {
+impl<T> binary::Converter for CustomConstantConverter<T> {
     fn length(&self) -> usize {
         std::mem::size_of::<T>()
     }

@@ -4,10 +4,10 @@ use std::{
 };
 
 use binary::{
+    Converter,
     allocator::Allocator,
     converter,
     converters::{collection_converter::CollectionConverter, little_endian_converter::LittleEndianConverter, string_converter::StringConverter},
-    interface::Converter,
 };
 
 fn base_info_with_data<T: IntoIterator + 'static>(item_converter: Box<dyn converter::Converter<<T as IntoIterator>::Item>>)

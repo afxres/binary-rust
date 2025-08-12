@@ -3,7 +3,7 @@ use crate::{
     internal::{error_helper, length},
 };
 
-pub trait Converter<T>: crate::interface::Converter {
+pub trait Converter<T>: crate::Converter {
     fn encode(&self, allocator: &mut Allocator, item: &T) -> Result<(), Box<dyn std::error::Error>>;
 
     fn encode_auto(&self, allocator: &mut Allocator, item: &T) -> Result<(), Box<dyn std::error::Error>> {

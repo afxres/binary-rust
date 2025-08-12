@@ -13,7 +13,7 @@ impl<T> LittleEndianConverter<T> {
     }
 }
 
-impl<T> crate::interface::Converter for LittleEndianConverter<T> {
+impl<T> crate::Converter for LittleEndianConverter<T> {
     fn length(&self) -> usize {
         std::mem::size_of::<T>()
     }

@@ -38,7 +38,7 @@ impl<T: IntoIterator> CollectionConverter<T> {
     }
 }
 
-impl<T: IntoIterator> crate::interface::Converter for CollectionConverter<T> {
+impl<T: IntoIterator> crate::Converter for CollectionConverter<T> {
     fn length(&self) -> usize {
         0
     }
