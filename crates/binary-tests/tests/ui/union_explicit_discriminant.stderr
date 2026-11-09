@@ -1,0 +1,5 @@
+error: enum variant `B`: `#[binary(union)]` tags follow declaration order, so explicit discriminants are not supported
+  --> tests/ui/union_explicit_discriminant.rs:10:7
+   |
+10 |     B = 5,
+   |       ^

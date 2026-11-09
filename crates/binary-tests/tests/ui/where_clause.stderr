@@ -1,0 +1,5 @@
+error: `where` clauses are not supported by `binary` derive; a lifetime parameter needs no bound
+ --> tests/ui/where_clause.rs:5:1
+  |
+5 | where
+  | ^^^^^

@@ -1,0 +1,16 @@
+﻿# F# wire fixture — real Mikodev.Binary.FSharp output (`AddFSharpConverterCreators`
+# + `EncodeAuto`), not a re-implementation of its rules. The probe is
+# machine-local and is not committed; how to rebuild it is in DESIGN §12.5.
+#
+# Columns: name <TAB> hex
+#
+# Only union rows: `UnionConverterCreator` in Binary.FSharp is a separate
+# implementation from the C# one, and it was never compared byte for byte. The
+# rest of the corpus (named objects, tuple objects, containers) has no F#
+# counterpart of the same shape — `csharp.tsv` covers those through the same
+# library's reflection converters.
+union_dot	00
+union_circle	01000000000000f83f
+union_text	020161
+union_rect	030100000002000000
+union_pair	04010000000178

@@ -1,0 +1,5 @@
+error: `#[repr(u8)]` does not apply to `#[binary(union)]`: the tag is always a compact integer, independent of any repr
+ --> tests/ui/union_repr.rs:7:3
+  |
+7 | #[repr(u8)]
+  |   ^^^^

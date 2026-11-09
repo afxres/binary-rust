@@ -1,0 +1,5 @@
+error: conflicting `#[binary(...)]` modes: `union` cannot be combined with an earlier mode
+ --> tests/ui/conflicting_modes.rs:6:17
+  |
+6 | #[binary(tuple, union)]
+  |                 ^^^^^

@@ -1,0 +1,27 @@
+[package]
+name = "binary-tests"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Test-only crate: no `[lib]`, no `[[bin]]`. Everything lives under `tests/`, so
+# each file is its own binary and `cargo test -p binary-tests` runs them all.
+# Keeping the tests out of `binary` itself means the published crates stay
+# dependency-free and never build `trybuild`. `publish = false` keeps
+# `cargo publish --workspace` from trying to release this one.
+
+[dependencies]
+binary = { path = "../binary" }
+
+# Test-only. The published `binary` / `binary-derive` crates stay dependency-free;
+# `trybuild` only compiles the `tests/ui` fixtures and never enters the runtime
+# graph (`cargo tree -e normal` is still just binary -> binary-derive).
+[dev-dependencies]
+# Not pinned: the `compile_fail` API is stable, and the `.stderr` snapshots are
+# text produced by *rustc*, not by trybuild, so pinning this crate would only
+# pin the smaller half of the drift. If a bump changes the rendering, the run
+# fails loudly with a diff; review it and regenerate with `TRYBUILD=overwrite`.
+trybuild = "1"

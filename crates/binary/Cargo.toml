@@ -1,0 +1,29 @@
+[package]
+name = "binary"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# One crate, three tiers (DESIGN §17):
+#   (no features) — `no_std` + `alloc`: Vec / String / &str / arrays and every
+#                   `alloc` container (VecDeque / LinkedList / BinaryHeap /
+#                   BTreeMap / BTreeSet / Cow) still work. These impls are
+#                   unconditional, so `--no-default-features` exercises them.
+#   std           — `HashMap` / `HashSet` impls, plus the `#![no_std]` opt-out.
+#                   The error impls deliberately do *not* live here: they use
+#                   `core::error::Error` (1.81), which `std::error::Error` now
+#                   re-exports, so `source()` works on both tiers (DESIGN §18.7).
+#                   The hasher is generic, so no third-party crate is needed
+#                   (DESIGN §17.3 / §19.14).
+#   derive        — the proc-macro derives.
+# "no_std" here means "no_std + alloc", not "allocation-free" (§17.2).
+default = ["std", "derive"]
+std = []
+derive = ["dep:binary-derive"]
+
+[dependencies]
+binary-derive = { path = "../binary-derive", optional = true }

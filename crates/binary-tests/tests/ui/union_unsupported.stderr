@@ -1,0 +1,5 @@
+error: `binary` derive does not support Rust `union` types; declare an enum with `#[binary(union)]` instead
+ --> tests/ui/union_unsupported.rs:4:1
+  |
+4 | union U {
+  | ^^^^^

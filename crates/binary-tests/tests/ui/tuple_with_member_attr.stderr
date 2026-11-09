@@ -1,0 +1,5 @@
+error: `#[binary(tuple)]` does not support `rename` / `optional` / `skip`; field `b` carries one of them (`with` is allowed — it replaces the converter, not the layout)
+  --> tests/ui/tuple_with_member_attr.rs:10:5
+   |
+10 |     b: i32,
+   |     ^

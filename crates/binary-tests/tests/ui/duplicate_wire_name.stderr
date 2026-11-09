@@ -1,0 +1,5 @@
+error: duplicate wire name "id" on field `b`; `a` already uses it
+  --> tests/ui/duplicate_wire_name.rs:10:5
+   |
+10 |     b: i32,
+   |     ^

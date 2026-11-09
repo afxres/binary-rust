@@ -1,0 +1,5 @@
+error: enums require `#[binary(int)]` (discriminant) or `#[binary(union)]` (tag + value); without one of them the layout is ambiguous
+ --> tests/ui/enum_without_int.rs:4:1
+  |
+4 | enum Level {
+  | ^^^^

@@ -1,0 +1,5 @@
+error: enum has no variants
+ --> tests/ui/enum_no_variants.rs:5:8
+  |
+5 | enum E {}
+  |        ^^

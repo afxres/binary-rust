@@ -1,0 +1,5 @@
+error: tuple structs and unit structs are not supported in phase 1; use a named struct with `#[binary(tuple)]`
+ --> tests/ui/tuple_struct.rs:6:9
+  |
+6 | struct S(i32, i32);
+  |         ^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: `with` cannot be combined with `skip`: a skipped member is never encoded, so a converter has nothing to convert
+  --> tests/ui/with_skip.rs:17:29
+   |
+17 |     #[binary(with = "conv", skip)]
+   |                             ^^^^

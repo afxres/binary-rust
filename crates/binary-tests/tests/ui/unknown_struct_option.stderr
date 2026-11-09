@@ -1,0 +1,5 @@
+error: unknown or unsupported `#[binary(...)]` option `nope`; supported modes are `tuple` (structs), `int` (enums) and `union` (enums). Member options such as `rename` / `optional` / `skip` belong on the field
+ --> tests/ui/unknown_struct_option.rs:6:10
+  |
+6 | #[binary(nope)]
+  |          ^^^^

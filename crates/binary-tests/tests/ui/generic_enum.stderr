@@ -1,0 +1,5 @@
+error: `enum` supports at most one lifetime parameter and no type or const parameters; write the borrowed form (`&'de str`) or a concrete type
+ --> tests/ui/generic_enum.rs:5:8
+  |
+5 | enum E<T> {
+  |        ^

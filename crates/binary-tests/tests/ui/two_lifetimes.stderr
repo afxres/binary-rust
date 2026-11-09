@@ -1,0 +1,5 @@
+error: `struct` takes at most one lifetime parameter
+ --> tests/ui/two_lifetimes.rs:4:14
+  |
+4 | struct S<'a, 'b> {
+  |              ^^

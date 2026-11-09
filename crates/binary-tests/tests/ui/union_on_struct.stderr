@@ -1,0 +1,5 @@
+error: `#[binary(union)]` is only valid on enums
+ --> tests/ui/union_on_struct.rs:6:1
+  |
+6 | struct S {
+  | ^^^^^^

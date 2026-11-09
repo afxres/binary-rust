@@ -1,0 +1,5 @@
+error: `with` expects a plain string literal naming the converter module
+ --> tests/ui/with_not_literal.rs:5:21
+  |
+5 |     #[binary(with = conv)]
+  |                     ^^^^

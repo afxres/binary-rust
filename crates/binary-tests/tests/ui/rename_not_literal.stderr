@@ -1,0 +1,5 @@
+error: `rename` expects a plain string literal, got `1`
+ --> tests/ui/rename_not_literal.rs:5:23
+  |
+5 |     #[binary(rename = 1)]
+  |                       ^

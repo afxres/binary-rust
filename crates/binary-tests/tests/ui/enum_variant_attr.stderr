@@ -1,0 +1,5 @@
+error: `#[binary(...)]` is not supported on enum variants
+ --> tests/ui/enum_variant_attr.rs:8:6
+  |
+8 |     #[binary(rename = "x")]
+  |      ^^^^^^^^^^^^^^^^^^^^^^

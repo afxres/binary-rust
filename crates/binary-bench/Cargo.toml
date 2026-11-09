@@ -1,0 +1,26 @@
+[package]
+name = "binary-bench"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Local measurement tool, not part of the published graph. Mirrors the payloads
+# used by the C# (`Benchmarks.IntegrationTests`) and C++ (`binary-benchmarks`)
+# suites so the three numbers are comparable: one tuple object, one named object,
+# both the same value that `fixtures/csharp.tsv` already covers.
+#
+# Usage:
+#   cargo run --release -p binary-bench -- wire
+#   cargo run --release -p binary-bench -- errors
+#   cargo run --release -p binary-bench -- profile
+#
+# Deliberately dependency-free (like the rest of the workspace): the harness is
+# hand-rolled in `src/harness.rs` so the numbers do not depend on criterion's
+# statistical model, and so it stays comparable with google benchmark (C++) and a
+# plain stopwatch loop (C#).
+
+[dependencies]
+binary = { path = "../binary" }

@@ -1,0 +1,14 @@
+[workspace]
+members = ["crates/binary", "crates/binary-derive", "crates/binary-tests", "crates/binary-bench"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Mikodev"]
+repository = "https://github.com/afxres/binary-rust"
+# The floor is set by the code, not by preference: `core::error::Error` (used by
+# `Error::wrapped`) needs 1.81, and `usize::is_multiple_of` in `container.rs`
+# needs 1.87. Clippy's `incompatible_msrv` keeps this honest — raise the number
+# here only together with the feature that forces it (DESIGN §18.7).
+rust-version = "1.87"

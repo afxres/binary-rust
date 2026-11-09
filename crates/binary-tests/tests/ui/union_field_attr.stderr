@@ -1,0 +1,5 @@
+error: `#[binary(...)]` is not supported on union variant fields; union members are positional and always encoded, so `rename` / `optional` / `skip` do not apply
+ --> tests/ui/union_field_attr.rs:9:8
+  |
+9 |     A(#[binary(skip)] i32),
+  |        ^^^^^^^^^^^^^^

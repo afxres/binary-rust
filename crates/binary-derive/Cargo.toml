@@ -1,0 +1,16 @@
+[package]
+name = "binary-derive"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# Intentionally empty. The macros are implemented with the compiler-provided
+# `proc_macro` crate only, so this crate (and the runtime crate) stay free of
+# third-party dependencies.
