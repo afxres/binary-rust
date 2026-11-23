@@ -142,11 +142,15 @@ enum Kind {
 | String    | `String`, `&str`: UTF-8, validated on decode                                                             |
 | Sequence  | `Vec<T>`, `[T; N]`, `&[u8]`, `VecDeque<T>`, `LinkedList<T>`, `BinaryHeap<T>`                             |
 | Map / set | `BTreeMap<K, V>`, `BTreeSet<T>`, `HashMap<K, V, S>`, `HashSet<T, S>` (any hasher, feature `std`)         |
-| Tuple     | `()`, `(T,)`, up to 12 members                                                                           |
+| Tuple     | `(T,)` up to 12 members                                                                                  |
 | Optional  | `Option<T>`                                                                                              |
 | Borrowed  | `Cow<'_, str>`, `Cow<'_, [T]>`: decode always produces the owned variant                                 |
 | Pointer   | `Box<T>`, `Rc<T>`, `Arc<T>`: wire transparent                                                            |
 | Derived   | named structs, `#[binary(tuple)]` structs, C-like enums, tagged unions                                   |
+
+Zero-member tuples (`()`) are not convertible, matching the reference C# implementation, which
+rejects `System.ValueTuple` in both the reflection generator and the source generator. (The
+one-byte-per-conversion rule governs the auto forms only and is not the reason for this ban.)
 
 Container elements use the `auto` position, so a `Vec<i32>` and a `Vec<String>` both work without
 extra annotation; maps and sets are written as `(K, V)` entries. Decoding a borrowed member (`&str`,
@@ -166,9 +170,9 @@ extra annotation; maps and sets are written as `(K, V)` entries. Decoding a borr
 - **Errors are a concrete enum** with zero-allocation static messages; boxing is opt-in
   (`Error::message`, `Error::message_static`, `Error::wrapped`), so `?` stays cheap and
   `core::error::Error::source()` still works.
-- **Byte-level compatibility is tested, not assumed**: 33 C# fixtures, 27 C++ fixtures and 5 F#
-  union fixtures are asserted byte for byte, and 27 compile-fail snapshots pin the derive's
-  diagnostics (message, caret position, no duplicates).
+- **Byte-level compatibility is tested, not assumed**: 74 rows of the shared cross-language wire
+  fixture table and 5 F# union fixtures are asserted byte for byte, and 27 compile-fail snapshots
+  pin the derive's diagnostics (message, caret position, no duplicates).
 - **Benchmarks are in the repo** (`crates/binary-bench`): wire, object, collection, error, profile
   and named-key lookup groups, reusing the payloads the C# and C++ benchmark devices use.
 

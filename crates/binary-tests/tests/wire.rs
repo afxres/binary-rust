@@ -222,11 +222,6 @@ fn test_ten_element_tuple_matches_csharp() {
 }
 
 #[test]
-fn test_empty_tuple() {
-    assert_eq!(round_trip(&()), ());
-}
-
-#[test]
 fn test_array() {
     assert_eq!(round_trip(&[1i32, 2, 3, 4]), [1, 2, 3, 4]);
     assert_eq!(round_trip(&[0u8; 16]), [0u8; 16]);
@@ -517,42 +512,6 @@ fn test_write_prefixed_bounded_inner_failure_propagates() {
 }
 
 #[test]
-fn test_unit_has_length_prefix() {
-    // `()` is zero-sized but classified as variable-length: `auto` must write
-    // a zero-length prefix so containers can count elements.
-    let mut e = Encoder::new();
-    ().encode_auto(&mut e).unwrap();
-    assert_eq!(e.finish().unwrap(), vec![0x00]);
-    assert_eq!(round_trip(&()), ());
-}
-
-#[test]
-fn test_vec_of_unit_preserves_count() {
-    let v = vec![(), (), ()];
-    let mut e = Encoder::new();
-    v.encode_auto(&mut e).unwrap();
-    let bytes = e.finish().unwrap();
-    // outer prefix (3) + one 0x00 prefix per element
-    assert_eq!(bytes, vec![3, 0, 0, 0]);
-    assert_eq!(round_trip(&v), v);
-}
-
-#[test]
-fn test_array_of_unit_preserves_count() {
-    let a = [(), (), ()];
-    let mut e = Encoder::new();
-    a.encode_auto(&mut e).unwrap();
-    assert_eq!(e.finish().unwrap(), vec![3, 0, 0, 0]);
-    assert_eq!(round_trip(&a), a);
-}
-
-#[test]
-fn test_option_of_unit() {
-    assert_eq!(round_trip(&Some(())), Some(()));
-    assert_eq!(round_trip(&None::<()>), None);
-}
-
-#[test]
 fn test_tuple_flatten_equals_nested() {
     // C# / C++ README 的规范例子：任意层级嵌套的 tuple 与直接平铺的 wire 必须完全相等。
     let nested = (
@@ -712,11 +671,10 @@ fn test_layout_len_values() {
     assert_eq!(<Vec<i32> as Layout>::LEN, 0);
     assert_eq!(<Option<i32> as Layout>::LEN, 0);
 
-    // Zero-sized types are variable, not "fixed at 0 bytes": a container has to
-    // recover the element count from somewhere.
-    assert_eq!(<() as Layout>::LEN, 0);
+    // Zero-sized *sequences* are variable, not "fixed at 0 bytes": a container
+    // has to recover the element count from somewhere. `()` has no `Layout` at
+    // all — zero-member tuples are outside the wire contract entirely.
     assert_eq!(<[i32; 0] as Layout>::LEN, 0);
-    assert_eq!(<(i32, ()) as Layout>::LEN, 0);
 
     // Composition: sums only when every member is fixed.
     assert_eq!(<(i32, i32) as Layout>::LEN, 8);
@@ -743,19 +701,6 @@ fn test_zero_length_array_is_variable() {
     let bytes = auto_bytes(&v);
     assert_eq!(bytes, [0x03, 0x00, 0x00, 0x00]);
     assert_eq!(from_auto::<Vec<[i32; 0]>>(&bytes).len(), 3);
-}
-
-/// Same reasoning one level up: a zero-sized member makes the tuple
-/// variable-length, so an enclosing `Vec` still counts elements. Were `()` ever
-/// classified as "fixed 0", `(i32, ())` would collapse to 4 and the elements
-/// below would become indistinguishable.
-#[test]
-fn test_tuple_with_zst_member_stays_variable() {
-    let v = vec![(1i32, ()), (2, ())];
-    let bytes = auto_bytes(&v);
-    // 0x0A payload: [01 00 00 00][00] [02 00 00 00][00]
-    assert_eq!(bytes, [0x0A, 1, 0, 0, 0, 0x00, 2, 0, 0, 0, 0x00]);
-    assert_eq!(from_auto::<Vec<(i32, ())>>(&bytes), v);
 }
 
 #[test]

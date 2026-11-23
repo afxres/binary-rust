@@ -1,16 +1,18 @@
 //! The one table of fixture values behind the `fixtures/*.tsv` assertions.
 //!
-//! `csharp.tsv`, `cxx.tsv` and `fsharp.tsv` are emitted by the real C#, C++ and
-//! F# libraries, but all three are asserted against the *same* Rust values, so
-//! the name → type → value mapping lives here instead of being duplicated per
-//! test binary. (Every `tests/*.rs` file is its own crate, so this module is
-//! compiled once per file — same as `common` itself.)
+//! `wire.tsv` is shared verbatim with the C# and C++ repositories and is asserted
+//! by all three, so the name → type → value mapping lives here instead of being
+//! duplicated per test binary. `fsharp.tsv` holds the union rows only, since
+//! `IUnion` does not exist on net10 and `wire.tsv` is shared across both targets.
+//! (Every `tests/*.rs` file is its own crate, so this module is compiled once per
+//! file — same as `common` itself.)
 //!
-//! Adding a case means adding a row to `csharp.tsv` (plus `cxx.tsv` when the C++
-//! side can express it, and `fsharp.tsv` only for the union rows) and an entry
-//! below; an unknown name panics rather than being skipped.
+//! Adding a case means adding a row to `wire.tsv` with `rs` in its language
+//! column (`fsharp.tsv` for a union) plus an entry below; an unknown name panics
+//! rather than being skipped.
 
 use binary::{Decode, Decoder, Encode, Encoder};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 struct Tiny {
@@ -103,6 +105,19 @@ macro_rules! cases {
             e.finish().unwrap()
         }
 
+        /// The `Encode` form: no length header, the boundary belongs to the caller.
+        pub fn encode_bare_case(name: &str) -> Vec<u8> {
+            match name {
+                $($name => {
+                    let v: $ty = $value;
+                    let mut e = Encoder::new();
+                    v.encode(&mut e).unwrap();
+                    e.finish().unwrap()
+                })*
+                _ => panic!("fixture case has no Rust value: {name}"),
+            }
+        }
+
         /// Every case name, in table order.
         pub fn case_names() -> &'static [&'static str] {
             &[$($name),*]
@@ -119,22 +134,68 @@ macro_rules! cases {
                 _ => panic!("fixture case has no Rust value: {name}"),
             }
         }
+
+        /// Decode `wire` (bare via `Decode`, or `auto` via `DecodeAuto`) and
+        /// compare the result to the corpus value structurally.
+        pub fn verify_decode_case(name: &str, wire: &[u8], auto: bool) {
+            match name {
+                $($name => {
+                    let expected: $ty = $value;
+                    let mut d = Decoder::new(wire);
+                    let actual: $ty = if auto {
+                        Decode::decode_auto(&mut d)
+                    } else {
+                        Decode::decode(&mut d)
+                    }
+                    .unwrap_or_else(|e| panic!("decode {name}: {e:?}"));
+                    assert_eq!(actual, expected, "case {name}: decoded value differs from the corpus value");
+                })*
+                _ => panic!("fixture case has no Rust value: {name}"),
+            }
+        }
     };
 }
 
 cases! {
-    "i32_42" => i32 { 42 },
+    "bool_true" => bool { true },
+    "bool_false" => bool { false },
+    "u8_0" => u8 { 0 },
+    "u8_255" => u8 { u8::MAX },
+    "i8_neg128" => i8 { i8::MIN },
+    "i8_neg1" => i8 { -1 },
+    "i8_127" => i8 { i8::MAX },
+    "u16_0" => u16 { 0 },
+    "u16_60000" => u16 { 60000 },
+    "u16_max" => u16 { u16::MAX },
+    "i16_min" => i16 { i16::MIN },
+    "i16_neg2" => i16 { -2 },
+    "i16_0" => i16 { 0 },
+    "i16_max" => i16 { i16::MAX },
+    "u32_0" => u32 { 0 },
+    "u32_max" => u32 { u32::MAX },
+    "i32_min" => i32 { i32::MIN },
     "i32_neg7" => i32 { -7 },
-    "i32opt_none" => Option<i32> { None },
-    "i32opt_some5" => Option<i32> { Some(5) },
-    "vec_i32opt" => Vec<Option<i32>> { vec![None, Some(5)] },
-    "vec_i32opt_none" => Vec<Option<i32>> { vec![None] },
-    "named_with_opt_none" => WithOpt { WithOpt { v: None } },
-    "named_with_opt_some" => WithOpt { WithOpt { v: Some(5) } },
-    "tupleobj_two_int" => TupleTwoInt { TupleTwoInt { a: 1, b: 2 } },
-    "tupleobj_int_str" => TupleIntStr { TupleIntStr { a: 1, b: "a".to_string() } },
-    "enum_green" => Color { Color::Green },
-    "vec_enum" => Vec<Color> { vec![Color::Red, Color::Green] },
+    "i32_0" => i32 { 0 },
+    "i32_42" => i32 { 42 },
+    "i32_max" => i32 { i32::MAX },
+    "u64_0" => u64 { 0 },
+    "u64_max" => u64 { u64::MAX },
+    "i64_min" => i64 { i64::MIN },
+    "i64_neg2" => i64 { -2 },
+    "i64_0" => i64 { 0 },
+    "i64_max" => i64 { i64::MAX },
+    "u128_0" => u128 { 0 },
+    "u128_max" => u128 { u128::MAX },
+    "i128_min" => i128 { i128::MIN },
+    "i128_neg1" => i128 { -1 },
+    "i128_0" => i128 { 0 },
+    "i128_max" => i128 { i128::MAX },
+    "f32_0" => f32 { 0.0 },
+    "f32_neg_zero" => f32 { -0.0 },
+    "f32_1_5" => f32 { 1.5 },
+    "f64_0" => f64 { 0.0 },
+    "f64_neg_zero" => f64 { -0.0 },
+    "f64_1_5" => f64 { 1.5 },
     "string_empty" => String { String::new() },
     "string_16a" => String { "a".repeat(16) },
     "string_17a" => String { "a".repeat(17) },
@@ -143,16 +204,41 @@ cases! {
     "string_127a" => String { "a".repeat(127) },
     "string_128a" => String { "a".repeat(128) },
     "string_20zh" => String { "中".repeat(20) },
+    "string_2emoji" => String { "😀".repeat(2) },
+    "i32opt_none" => Option<i32> { None },
+    "i32opt_some5" => Option<i32> { Some(5) },
+    "named_with_opt_none" => WithOpt { WithOpt { v: None } },
+    "named_with_opt_some" => WithOpt { WithOpt { v: Some(5) } },
+    "tuple_i32_str" => (i32, String) { (1, "a".to_string()) },
+    "tuple_three" => (i32, i32, String) { (1, 2, "c".to_string()) },
+    "tuple_nested_pair" => ((i32, String), (i32, i32)) { ((1, "a".to_string()), (2, 3)) },
     "vec_i32_3" => Vec<i32> { vec![1, 2, 3] },
     "vec_i32_5" => Vec<i32> { vec![1, 2, 3, 4, 5] },
     "vec_string_4x4" => Vec<String> { vec![
         "aaaa".to_string(), "bbbb".to_string(), "cccc".to_string(), "dddd".to_string(),
     ] },
     "vec_vec_i32" => Vec<Vec<i32>> { vec![vec![1], vec![2]] },
-    "tuple_i32_str" => (i32, String) { (1, "a".to_string()) },
+    "vec_i32opt" => Vec<Option<i32>> { vec![None, Some(5)] },
+    "vec_i32opt_none" => Vec<Option<i32>> { vec![None] },
+    "sortedset_i32_5" => BTreeSet<i32> { BTreeSet::from([1, 2, 3, 4, 5]) },
+    "sorteddictionary_i32_str" => BTreeMap<i32, String> { BTreeMap::from([
+        (1, "a".to_string()), (2, "b".to_string()),
+    ]) },
+    "sorteddictionary_i32_i32_5" => BTreeMap<i32, i32> { BTreeMap::from([
+        (1, 1), (2, 2), (3, 3), (4, 4), (5, 5),
+    ]) },
+    "sorteddictionary_i32_str_4" => BTreeMap<i32, String> { BTreeMap::from([
+        (1, "a".to_string()), (2, "b".to_string()), (3, "c".to_string()), (4, "d".to_string()),
+    ]) },
+    "kvp_i32_str" => (i32, String) { (1, "a".to_string()) },
+    "enum_green" => Color { Color::Green },
+    "vec_enum" => Vec<Color> { vec![Color::Red, Color::Green] },
     "named_tiny" => Tiny { Tiny { x: 7 } },
     "named_person" => Person { Person { id: 42, name: "Bob".to_string() } },
     "named_mid" => Mid { Mid { a: 1, b: 2, c: 3 } },
+    "tupleobj_two_int" => TupleTwoInt { TupleTwoInt { a: 1, b: 2 } },
+    "tupleobj_int_str" => TupleIntStr { TupleIntStr { a: 1, b: "a".to_string() } },
+    "bytes_5" => Vec<u8> { vec![1, 2, 3, 4, 5] },
     "union_dot" => Measure { Measure::Dot },
     "union_circle" => Measure { Measure::Circle(1.5) },
     "union_text" => Measure { Measure::Text("a".to_string()) },

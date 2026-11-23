@@ -1,4 +1,4 @@
-//! Compile-fail tests for `binary-derive`.
+//! Compile-fail tests: `binary-derive` diagnostics and trait-level rejections.
 //!
 //! Every file in `tests/ui` must fail to compile with exactly the diagnostics
 //! recorded in the neighbouring `.stderr`. Regenerate snapshots after an

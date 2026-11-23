@@ -1,0 +1,15 @@
+error[E0277]: the trait bound `(): Encode` is not satisfied
+ --> tests/ui/unit_tuple.rs:2:28
+  |
+2 |     let _ = binary::to_vec(&());
+  |             -------------- ^^^ the trait `Encode` is not implemented for `()`
+  |             |
+  |             required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `Encode`:
+            (T₁, T₂, …, Tₙ) for tuples of arity 1 up to and including 12
+note: required by a bound in `to_vec`
+ --> $WORKSPACE/crates/binary/src/oneshot.rs
+  |
+  | pub fn to_vec<T: Encode + ?Sized>(value: &T) -> Result<Vec<u8>> {
+  |                  ^^^^^^ required by this bound in `to_vec`

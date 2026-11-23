@@ -9,14 +9,15 @@
 //! implementation from the C# one — it reflects over `FSharpType` / `UnionCaseInfo`
 //! instead of `IUnion` — and it had never been compared byte for byte. The rest
 //! of the corpus (named objects, tuple objects, containers) has no F# shape of
-//! its own; `csharp.tsv` covers those through the same library.
+//! its own; `wire.tsv` covers those through the same library.
 //!
-//! The cases run through `common::cases` like the other two tables, so a name
-//! cannot mean different values here and there.
+//! The cases run through `common::cases` like the shared table, so a name cannot
+//! mean different values here and there.
 
 mod common;
 
-use common::cases::encode_case;
+use common::cases::{encode_case, verify_decode_case};
+use common::from_hex;
 use common::to_hex;
 
 const FIXTURES: &str = include_str!("../fixtures/fsharp.tsv");
@@ -35,6 +36,7 @@ fn test_fsharp_fixtures() {
         assert!(cols.next().is_none(), "trailing column in {name}");
 
         assert_eq!(to_hex(&encode_case(name)), hex, "case {name}");
+        verify_decode_case(name, &from_hex(hex), true);
         seen += 1;
     }
     assert_eq!(

@@ -10,7 +10,7 @@ publish = false
 # Local measurement tool, not part of the published graph. Mirrors the payloads
 # used by the C# (`Benchmarks.IntegrationTests`) and C++ (`binary-benchmarks`)
 # suites so the three numbers are comparable: one tuple object, one named object,
-# both the same value that `fixtures/csharp.tsv` already covers.
+# both the same value that `fixtures/wire.tsv` already covers.
 #
 # Usage:
 #   cargo run --release -p binary-bench -- wire

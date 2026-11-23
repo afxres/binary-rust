@@ -27,8 +27,8 @@
    评估：benchmark 证明代价可忽略（§19.3），结论仍按可观测性保留枚举（§18.8.7）。
    兼容性改由 **`#[non_exhaustive]`** 买单（§18.8.5）：加变体是 minor，改名与删除仍是 breaking。
 7. **「对齐」的验收标准是 fixture 字节断言，不是「应该能互解」**：从 C#/C++ 导出真实 wire
-   存成语料，Rust 侧逐字节断言（§12）。现已三边齐备：C# 33 条、C++ 27 条、F# 5 条 union
-   （§12.5）；C++ 少的 6 条是 nullable，它没有该 converter。
+   存成语料，Rust 侧逐字节断言（§12）。现在是一份三仓共享的 `wire.tsv`（122 条，`langs`
+   列声明每个实现必须断言哪些行，其中 74 条含 `rs`），外加 F# 的 5 条 union 语料（§12.5）。
 
 ---
 
@@ -300,16 +300,22 @@ Rust 用 trait 关联常量表达，并且**照抄同一个哨兵**：
 C++ 的 `GetConverterLength` 是运行时循环。分类抽到独立的 `Layout` trait，
 让 `Encode` 与 `Decode<'de>` 共享同一份判定，不会两边不一致。
 
-### 零字节类型归为变长
+### 零字节类型归为变长；零元 tuple 整体禁止
 
-不存在「定长 0 字节」这种分类：若 `()` 真按定长 0 字节处理，`Vec<()>` 的 payload
-就是 0 字节，`remaining / 0` 无法推断元素个数，解码会静默丢掉元素个数
-（payload 非空时还会死循环）。
+不存在「定长 0 字节」这种分类：零长序列（`[T; 0]`）按 `LEN = 0` 即变长处理，
+让默认 `encode_with_prefix` 走 anchor，写出一个 `0x00` 零长度前缀；容器因此能按
+前缀推进、恢复元素个数。回归测试：`test_zero_length_array_is_variable`。
 
-处理方式：**`LEN = 0`，即变长**，让默认 `encode_with_prefix` 走 anchor，
-写出一个 `0x00` 零长度前缀；容器因此能按前缀推进、恢复元素个数。
-回归测试：`test_vec_of_unit_preserves_count`、`test_zero_length_array_is_variable`、
-`test_tuple_with_zst_member_stays_variable`。
+但**零元 tuple 不参与转换**，口径与 C# 一致：参考实现不把零元 tuple 当可转换
+类型 —— 反射生成器对 `System.ValueTuple` 直接抛 `ArgumentException`（`Invalid
+type`），source generator 报 `BINSRCGEN13`「Type Not Recognized」诊断。Rust 侧
+对应地把 `()` 排除在 `Layout` / `Encode` / `Decode` 之外，任何容器
+（`Vec<()>`、`Option<()>`、`(i32, ())`）在编译期即被拒绝。「每次转换至少写一个
+字节」不是这条禁令的依据 —— 它只约束 auto 形式，raw 形式不受限制，`()` 的 auto
+形式本来就能写出 `0x00` 零长前缀。两条免检路径也各有 C# 对应：union 的 unit /
+零字段变体在 derive 里只写 tag，C# 的 `IsEmptyUnionCaseType` 同样把
+`ValueTuple` 与零字段类型判为空 case、只写 tag；零字段 struct 由
+`binary-derive` 拒绝（`struct has no fields`）。
 
 `0` 同时是「变长」和「`()` 的真实长度」，两者不需要区分——这正是裸 `usize` 比 `Option`
 顺手的地方：`array_len` 里 `N == 0` 与 `T::LEN == 0` 归一到同一个返回值，没有第二种
@@ -631,7 +637,7 @@ struct Person {
 |`borrow`|✅|单个生命周期参数绑到 `Decode<'de>`，借用由成员类型表达；`&'de [T]` 不做（§19.17）|
 |`rename_all`（容器级）|❌|未实现；C# record 的 PascalCase 属性名要求 n 个字段写 n 行 `rename`|
 
-已验证：`crates/binary-tests/tests/derive.rs` 的 25 个用例 + `fixtures/csharp.tsv` 的
+已验证：`crates/binary-tests/tests/derive.rs` 的 25 个用例 + `fixtures/wire.tsv` 的
 6 条 derive 相关 fixture（named、tuple object ×2、enum ×2、`int?` 成员）。
 **2026-11-07 之前前 5 个用例没有接线**——测试入口文件缺 `mod derive;`，等于宏从未被编译过。
 
@@ -964,14 +970,15 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 
 对齐判据（缺一不可）：
 
-1. **wire fixture 通过（分桶断言，见 §12.5）**：C# 语料在 `crates/binary-tests/fixtures/csharp.tsv`，
-   - `same` 桶：**断言 Rust encode 的字节完全相同**（当前 31 条）；
-   - `csharp-only` 桶（string `42..=127` 字符）：断言 payload 逐字节相同、
-     `reencode(csharp_wire) == rust_wire`（当前 2 条）；
-   - 反向：Rust encode 的结果 C# 必须能正确 decode（尚未自动化，靠 `same` 桶的字节相等间接保证）。
-   C++ 语料在 `crates/binary-tests/fixtures/cxx.tsv`（27 条，**全部逐字节相等**，没有桶列）：
-   `binary-cxx` 修掉容器头宽后与 Rust 同宽（§12.5）；缺的 6 条 nullable 由
-   `test_cxx_covers_every_expressible_case` 显式声明，不静默跳过。
+1. **wire fixture 通过（见 §12.5）**：只有一张共享表
+   `crates/binary-tests/fixtures/wire.tsv`（`name / bare / auto / langs`，122 条，与 C# / C++
+   两个仓库逐字节相同）。Rust 断言其中 `langs` 含 `rs` 的 **74 条**：`bare`（`Encode`）与
+   `auto`（`EncodeAuto`）两列都逐字节相等，且解码表里的字节能重新编码回去。
+   没有桶列 —— 桶的成因（C# 按 `3 * chars + 3` 估宽 string 头）只在
+   `EncodeWithLengthPrefix` 这个入口上成立，`EncodeAuto` 两边本来就同宽。
+   剩下的 48 条是 Rust 无法表达的类型（`char` 是 2 字节 UTF-16、`Half`、`decimal`、
+   `System.Numerics` 的向量、C# 特有容器），写 `cs` 而不是跳过 —— `every_case_is_a_row`
+   要求 `common::cases` 里的每个名字都有带 `rs` 的行（或明确列进 `LOCAL_CASES`）。
    F# 语料在 `crates/binary-tests/fixtures/fsharp.tsv`（5 条 union，**全部逐字节相等**）。
 2. **decode → encode 幂等**（Rust 自身）：Rust decode 出的值再 encode，字节稳定。这是精确长度
    预测路径的保证。C#/C++ 因容量依赖做不到，不影响 Rust 侧这一条。
@@ -1022,28 +1029,26 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 
 |测试文件|条数|覆盖|
 |:---|---:|:---|
-|`tests/wire.rs`|50|基础 wire / anchor / `compact_int` / 整块与逐元素对照 / 端序契约 / tuple / oneshot / `Debug` / `write_prefixed*`|
+|`tests/wire.rs`|44|基础 wire / anchor / `compact_int` / 整块与逐元素对照 / 端序契约 / tuple / oneshot / `Debug` / `write_prefixed*`|
 |`tests/derive.rs`|25|派生宏：union 8 + with 5 + C# record 1 等分组|
 |`tests/errors.rs`|15|自定义错误降级、`Cow` 形态、外层包装、位置折算、`Wrapped` 保留类型、变体语义（§18）|
 |`tests/named.rs`|14|手写 named 实现交叉验证|
 |`tests/smart_ptr.rs`|12|`Box` / `Rc` / `Arc` wire 透明、`?Sized`、递归 struct / union / tuple（§19.13）|
 |`tests/collections.rs`|11|容器与 `Vec<T>` / `Vec<(K, V)>` 逐字节相等、自定义 hasher、`Cow`、错位 payload（§19.14）|
 |`tests/borrow.rs`|8|借用成员零拷贝、解码指针落在输入缓冲内（§19.17）|
-|`tests/cxx_fixtures.rs`|2|27 条 C++ fixture 逐字节 + 覆盖集断言（§12.5）|
-|`tests/fixtures.rs`|1|33 条 C# fixture 逐字节（§12.5）|
+|`tests/fixtures.rs`|2|74 条共享 fixture 的 `Encode` / `EncodeAuto` 双列逐字节 + 「每个用例都有对应行」断言（§12.5）|
 |`tests/fsharp_fixtures.rs`|1|5 条 F# union fixture 逐字节（§12.5）|
 |`tests/buffer_contents.rs`|1|owned 后端水位线：33 个 fixture case 编码后整段比对（§19.15.18）|
 |`tests/ui.rs`|1|驱动 27 个 compile-fail（trybuild，§15；`#[cfg(not(miri))]` 跳过）|
 
-合计 141 条集成用例。共享件在 `tests/common/mod.rs`（`round_trip` / `with_header` / `split_prefixed` /
+合计 140 条集成用例。共享件在 `tests/common/mod.rs`（`round_trip` / `with_header` / `split_prefixed` /
 `from_hex` …）与 `tests/common/cases.rs`（三张表共用的 name → 类型 → 值）。`binary` 自己另有
 `tests/length.rs` 11 条（原 `src/length.rs` 的内联 `mod tests`，已外移），`src/` 里不再有
 `#[cfg(test)] mod tests`。
 
 |语料|条数|来源与状态|
 |:---|---:|:---|
-|`fixtures/csharp.tsv`|33|真实 C# 输出，全部逐字节相等|
-|`fixtures/cxx.tsv`|27|真实 C++ 输出，比 C# 少 6 条 nullable（C++ 没有 nullable converter，由覆盖集断言显式声明）|
+|`fixtures/wire.tsv`|122|真实 C# 输出（`Encode` / `EncodeAuto` 双列），与 C# / C++ 仓库逐字节相同；其中 74 条含 `rs`、74 条含 `cxx`|
 |`fixtures/fsharp.tsv`|5|F# union 输出，每条四边同 tag|
 
 ### 9.4 benchmark 与脚本
@@ -1109,7 +1114,7 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 |`with` / `borrow`|✅ 成员级转换器用 `Repr` 作契约，借用成员由成员类型表达|§19.17|
 |整块读写快路径|✅ `Vec<i32>` ×1024：encode 38 vs 逐元素 82 ns，decode 44.8–47.8 vs 1215–1440 ns；能力从 `Layout::POD` 收紧成元素内部钩子，`bool` / `char` 仍逐元素|§6 第 2 条 / §19.10 / §19.16|
 |benchmark harness|✅ Rust 手写 + C# JIT/AOT + C++ integration 三边同表；C# AOT 未并入同口径矩阵、C++ union 场景仍缺，属口径与覆盖问题（记 §19.6）|§19|
-|C++ 侧语料|✅ 27 条实测字节；顺带量出并修掉 C++ 在 17..=127 字节 payload 上写宽头的 bug（`binary-cxx` c6c11cb），重生成后全部逐字节相等|§12.5|
+|C++ 侧语料|✅ 33 条实测字节；顺带量出并修掉 C++ 在 17..=127 字节 payload 上写宽头的 bug（`binary-cxx` c6c11cb），重生成后全部逐字节相等|§12.5|
 |错误模型是否整体擦除|❌ 否决：失败路径只多约 5.5 ns + 一次分配，但失去可 `match` 的可观测性|§18.8.7 / §19.3|
 |API 审计|✅ 8 条已修、1 条保留（named 成员错误位置不回折），明细见下|—|
 
@@ -1519,52 +1524,72 @@ wire 直接损坏。宽头必须强制写 4 字节，为此新增 `length::encod
 
 ### 12.5 fixture 管道（已建成）
 
-三张表、三个断言文件，共用同一份「名字 → 类型 → 值」表：
+**一张共享表 + 一张 union 表**。三个仓库各存一份 `wire.tsv`，内容逐字节相同：
 
 ```text
-crates/binary-tests/fixtures/csharp.tsv      # name <TAB> bucket <TAB> hex，33 条（真实 C# 输出）
-crates/binary-tests/fixtures/cxx.tsv         # name <TAB> hex，27 条（真实 C++ 输出；无桶列，全 same）
+crates/binary-tests/fixtures/wire.tsv        # name <TAB> bare <TAB> auto <TAB> langs，122 条
 crates/binary-tests/fixtures/fsharp.tsv      # name <TAB> hex，5 条（真实 F# union 输出）
-crates/binary-tests/tests/fixtures.rs        # 断言 csharp.tsv
-crates/binary-tests/tests/cxx_fixtures.rs    # 断言 cxx.tsv + 「除缺口外全覆盖」集合断言
+crates/binary-tests/tests/fixtures.rs        # 断言 wire.tsv 里 langs 含 rs 的行（两个入口）
 crates/binary-tests/tests/fsharp_fixtures.rs # 断言 fsharp.tsv（union 行）
-crates/binary-tests/tests/common/cases.rs    # 三张表共用的 name → 类型 → 值 表
+crates/binary-tests/tests/common/cases.rs    # 两张表共用的 name → 类型 → 值 表
 ```
 
-`fsharp.tsv` 只放 union 行，不是为了省事：`Binary.FSharp` 的 `UnionConverterCreator`
-是**另一份实现**（反射 `FSharpType` / `UnionCaseInfo`，与 C# 的 `IUnion` 路径无关），
-而 F# 侧没有与「named object / tuple object / 容器」同形的类型 —— 那些行由
-`csharp.tsv` 用同一个库的反射 converter 覆盖。union 是这条路独有的一类语料，
-也正好是此前唯一没和真实实现比过的一类（§16.4）。
+同一份 `wire.tsv` 在 `binary-cxx` 里由 `code/binary-wire-tests/` 读取（74 条 `cxx` 行 × 2 个 API ×
+2 个入口，x86_64 与 s390x 全绿），在 `binary` 里由 `Binary.WireTests` 读取（122 行 × 2 入口 ×
+反射 / SG 两条路径）。
 
-- **生成端：可复现方法**。三张表都不是在这里重写一遍规则，而是驱动**真实的**参考实现
-  （C# `Mikodev.Binary` 的 `Converter.EncodeAuto`、C++ `binary-cxx` 的 `ConverterEncodeAuto`、
-  F# `Binary.FSharp` 的 `AddFSharpConverterCreators` + `EncodeAuto`）打出字节。探针是一次性
-  程序、**不入库**：C++ 那个要 include 外部 checkout 的头文件并链接其 `libbinary.a`，F# 那个
-  要引用 `Binary.FSharp.fsproj`，干净 clone 构建不出来；入库的是三张表本身。复现按三步走，
-  三边同形：
+`wire.tsv` 里没有桶列，也没有 `group` / `aot`：`bare` 是 `Encode`（无长度头，边界归调用方），
+`auto` 是 `EncodeAuto`（自定界，给容器元素 / tuple 成员 / 对象成员用），`langs` 是
+`cs` / `cxx` / `rs` 的逗号组合，声明**哪些实现必须断言行**。同一份文件复制到三个仓库就能
+直接跑，缺口写在行里，不需要额外脚本 diff 三张表。
+
+**`auto` 列可以写多个合法字节串，用 `|` 分隔**。长度头在 payload < 128 时是 1 字节、否则 4
+字节，而**两种宽度对任何长度都合法**（decode 接受 `offset == 1 || 4`），所以谁写哪种是实现
+自己的事。断言就是集合成员：产出等于其中任一个即通过，否则失败，**没有 decode 回落** ——
+用「解码后值相等」兜底会把真实的字节差异藏起来（`linkedlist_i32_5` 曾经因此绿着却多写了 3
+字节）。当前有 4 行带两种写法：`vec_i32_5`（大端主机上 `int[]` 走不了原生端序快路径，锚点把
+20 字节 payload 写成 4 字节头）、`linkedlist_i32_5`、`sortedset_i32_5`、
+`sorteddictionary_i32_i32_5`（C# 放弃了对非常用集合的精确头优化，改回锚点，C++ / Rust 仍是
+1 字节头）。
+
+**decode 方向两种宽度都验，且不限于表里列出的写法**：凡是**有自己的长度头**的行，1 字节与 4
+字节两种帧都必须解出同一个值。只解自己写出来的那种宽度，等于解码器只认自家签发的东西 ——
+表里的 1 字节写法正好把这个缺陷藏住（C# 上有 25 条 `rs` 行、C++ 上有 25 条 `cxx` 行会各跑两
+遍）。三种语言用同一条判据判断「有没有自己的头」：**帧必须以 `bare` payload 结尾**，光看长度
+差不行 —— tuple 型（`tuple_i32_str` = `01000000 0161`，bare 5 字节）多出来的是成员 string 自己
+的前缀，它本身没有外层头；定长 converter（`bool_true`、`matrix3x2`）则根本不加头。这两类跳过
+加宽。
+
+| `langs` | 条数 | 含义 |
+|:---|--:|:---|
+| `cs,cxx,rs` | 74 | 三边都能表达，字节必须一致 |
+| `cs` | 48 | Rust / C++ 没有等价类型：`char`（C# 2 字节 UTF-16）、`Half`、`decimal`、`DateTime` 系列、`Guid`、`BigInteger`、`Uri`、`BitVector32`、`Index`、`Range`、`Complex`、`Vector*` / `Matrix*`、C# 特有容器 |
+
+**为什么 union 不进共享表**：`IUnion` 只在 net11 可用，而 `wire.tsv` 被 net10 / net11 两个
+TFM 共用，条件行会破坏「表 == 语料」。`fsharp.tsv` 因此保留两列格式。`Binary.FSharp` 的
+`UnionConverterCreator` 是**另一份实现**（反射 `FSharpType` / `UnionCaseInfo`，与 C# 的
+`IUnion` 路径无关），正好单独钉住；named object / tuple object / 容器在 F# 侧没有同形类型，
+由 `wire.tsv` 用同一个库的反射 converter 覆盖。
+
+- **生成端：可复现方法**。表不是在这里重写一遍规则，而是驱动**真实的**参考实现
+  （C# `Mikodev.Binary` 的 `Encode` / `EncodeAuto`、C++ `binary-cxx` 的 `ConverterEncode` /
+  `ConverterEncodeAuto`、F# `Binary.FSharp` 的 `AddFSharpConverterCreators` + `EncodeAuto`）
+  打出字节。探针是一次性程序、**不入库**：C++ 那个要 include 外部 checkout 的头文件并链接其
+  `libbinary.a`，F# 那个要引用 `Binary.FSharp.fsproj`，干净 clone 构建不出来；入库的是表本身。
   1. **取用例集**：`crates/binary-tests/tests/common/cases.rs` 是权威清单 —— 每行的 `name`、
-     Rust 类型、构造值都在那里，探针照着它声明同形的参考类型、赋同一组值。表的条数由它
-     决定（33 / 27 / 5）；加用例时先改这一处，再重跑探针重生成整张表。
-  2. **调真实实现的 `EncodeAuto`**：新建控制台程序引用对应库，逐个值取字节。C# 的两条
-     `csharp-only` 行（`string_42a` / `string_127a`）走的是**带前缀**路径，要用
-     `EncodeWithLengthPrefix` 取。零成员类型（`union_dot`）库里没有现成 converter，探针里
-     手写一个「`Length == 0`、`EncodeAuto` 也写 0 字节」的 converter 并注册，写法见 §16.4
-     —— C# 用库自带的 `[Converter]` 特性，不必改 generator 装配，`Generator.CreateDefault()`
-     原样可用；C++ 要 `generator.AddConverter(...)`，且必须排在 `VariantConverter<T>` 构造
-     之前（后者构造时就要取各 alternative 的 converter）。
-  3. **打印表体**：每行 `name <TAB> hex`，hex 小写、无分隔，表体打 stdout 重定向进
-     `fixtures/*.tsv`。C# 表多一列 `bucket`：`same` / `csharp-only`，判据是实际字节长度与
-     Rust 的预测宽度比（§12.3 的 `42..=127` 区间），例外人工对着字节确认，不由测试代码猜；
-     C++ / F# 表全部逐字节相同，没有这一列。
+     Rust 类型、构造值都在那里，探针照着它声明同形的参考类型、赋同一组值。加用例时先改这一
+     处，再重跑探针重生成整张表。
+  2. **两个入口各打一遍**：`bare` 列走 `Encode`，`auto` 列走 `EncodeAuto`，同一份值各打一次。
+     两者不能互相推导 —— tuple 的末位变长成员在 `auto` 下从 raw 变成带前缀，而定长末位成员
+     两列相同。零成员类型（`union_dot`）库里没有现成 converter，探针里手写一个「`Length == 0`、
+     `EncodeAuto` 也写 0 字节」的 converter 并注册，写法见 §16.4 —— C# 用库自带的 `[Converter]`
+     特性，`Generator.CreateDefault()` 原样可用；C++ 要 `generator.AddConverter(...)`，且必须
+     排在 `VariantConverter<T>` 构造之前（后者构造时就要取各 alternative 的 converter）。
+  3. **打印表体**：每行 `name <TAB> bare <TAB> auto <TAB> langs`，hex 小写、无分隔，零字节记
+     `-`（tab 分隔的行不能以空字段结尾）。C# 侧另有一个一次性生成器直接读同一份 `cases.rs`
+     对应的语料，顺带校验反射与 AOT 两条路径字节一致，不一致就拒绝写文件。
 - **断言端**：`include_str!` 在编译期读表，`cases.rs` 的 `macro_rules!` 把用例名映射到具体
-  类型的值；同一张表既做 encode 断言也做 decode 回环。**用例名找不到会 panic，不会静默跳过**。
-- **分桶**（只有 C# 表带第三列，显式声明，不靠测试代码猜）：
-  - `same`：两边逐字节相同，断言字节相等（31 条）。
-  - `csharp-only`：C# 用了宽头（string 的 `42..=127` 字符区间，2 条），断言「payload 逐字节
-    相等」+「Rust 能解 C# 的字节并还原成自己的 wire」。
-  C++ 表没有桶列：27 条全部 `same`，容器头宽修掉之后（见下）不存在第三种情形。
-  F# 表也没有桶列，5 条全部 `same`。
+  类型的值；同一份字节既做 encode 断言也做 decode 回环。**用例名找不到会 panic，不会静默跳过**。
 - **C++ 容器的头宽：曾经错，已修（`binary-cxx` c6c11cb，2026-11-08）**。修之前
   `ContainerConverter` 不 override `EncodeWithLengthPrefix`，落到
   `Converter<T>::EncodeWithLengthPrefix` 的 anchor 路径 —— `Anchor()` 先占 4 字节，写完由
@@ -1588,7 +1613,8 @@ crates/binary-tests/tests/common/cases.rs    # 三张表共用的 name → 类�
   它写 1 字节头、C# 写 4 字节头；收窄成 `Copyable` 单分支后三者同一条规则。两边各补 5 条
   用例（`…EncodeAutoBlittableShortLengthPrefixTest` / `…BlittableLengthPrefixBoundaryTest` /
   `…NonBlittableKeepsAnchorTest` / `…NonContiguousKeepsAnchorTest` / `…EmptyContainerTest`），
-  钉住「预测只给连续 + blittable」。修完 `vec_i32_5` 变 `same`，桶列删除；§12.3 那句
+  钉住「预测只给连续 + blittable」。修完 `vec_i32_5` 与 Rust 同字节（当时的桶列随之作废，
+  后来两张旧表合并成共享表时整列去掉）；§12.3 那句
   「Rust ↔ C++ 在容器上不一致」随之改回**完全一致**。
 - **大端主机没有这条快路径 → 已修（2026-11-08，四架构矩阵首跑发现，同日修掉）**。
   `Copyable` 原来把 `std::endian::native == std::endian::little` 也写进同一个谓词
@@ -1611,18 +1637,24 @@ crates/binary-tests/tests/common/cases.rs    # 三张表共用的 name → 类�
   继续钉住这条；大端与 LE 在这条路径上本来就一致，所以 C# 语料的逐字节断言不受影响。
   修完 s390x 的 `vec_i32_5` 回到 21 字节，两条用例的 `if constexpr (std::endian::native == …)`
   分支删掉、改回单一断言，`<bit>` 引用一并删除。
-- **缺口**：`cxx.tsv` 比 `csharp.tsv` 少 6 条 —— `i32opt_none` / `i32opt_some5` /
-  `vec_i32opt` / `vec_i32opt_none` / `named_with_opt_none` / `named_with_opt_some`。
-  原因是 `binary-cxx` **没有 nullable converter**（`code/` 下既没有 `optional` 也没有
-  `Nullable*`；`std::variant` 是「索引 + 活跃分支」，与 `Option<T>` 的「tag + `auto(value)`、
-  不套前缀」不是同一形状）。在这里手写一个 `std::monostate` 适配器只能证明「这个文件能写出
-  这些字节」，证不了「C++ 库会这么写」，所以宁缺不造。
-  `tests/cxx_fixtures.rs::test_cxx_covers_every_expressible_case` 把这层意思钉成断言：
-  C++ 的名字集合必须等于 C# 的集合减去 `CXX_GAP` ——往 `csharp.tsv` 加一条却不更新
-  `cxx.tsv`（或缺口表）会直接失败，不会悄悄少测。
-- **覆盖**：payload 16 / 17、字符串 0 / 16 / 17 / 41 / 42 / 127 / 128 字符、多字节字符、
-  `Vec<定长>`（12 / 20 字节两档）/ `Vec<变长>` / `Vec<Option<i32>>` / `Vec<enum>`、tuple、
-  tuple object ×2、named（含 `int?` 成员）、`Option`、enum。
+- **nullable 缺口：已补齐，随后并入共享表**。C++ 侧曾经没有 nullable converter，比 C# 少 6 条
+  （`i32opt_none` / `i32opt_some5` / `vec_i32opt` / `vec_i32opt_none` / `named_with_opt_none` /
+  `named_with_opt_some`）。现在 `binary-cxx` 有
+  `converters::OptionalConverter<std::optional<E>>`（virtual）与静态版同名类型（template），
+  wire 是「长度前缀 tag（0/1）+ 与入口一致的 payload」，与 `VariantConverter` 的
+  `std::variant<std::monostate, E>` 逐字节相同 —— 后者早就把 `monostate` 当「只写 tag」，
+  所以两条路共享同一份字节，只是 optional 不需要变体的 `index()` / `get` / `in_place_index`。
+  没有直接复用 `VariantConverter` 是因为它的模板约束在 `std::variant_size`，对 optional 不成立。
+  等价性由 `binary-cxx` 的 `OptionalConverterMatchesVariantWithMonostateTest` 钉住（同一组值
+  两个 converter 必须产出同一字节），6 条语料用真实实现重新生成，逐字节相等。两张旧表
+  （`csharp.tsv` / `cxx.tsv`）合并成 `wire.tsv` 之后，这 6 条就是 `langs = cs,cxx,rs` 的普通行，
+  「C++ 少一行」这类缺口从此由 `langs` 列直接表达。
+- **覆盖**：`bool`；`u8`–`u128` 与 `i8`–`i128` 每个宽度的 0 / min / max / 全 1（`i128_neg1`
+  专门验 16 个 `ff`，`i128_max` 验「除最高位全 1」）；`f32` / `f64` 的 `0.0` 与 `-0.0`
+  （符号位单独存在）；payload 16 / 17；字符串 0 / 16 / 17 / 41 / 42 / 127 / 128 字符、
+  多字节汉字、4 字节 emoji；`Vec<定长>`（12 / 20 字节两档）/ `Vec<变长>` / `Vec<Option<i32>>` /
+  `Vec<enum>`；tuple（1 元到 3 元、8 成员跨 1/2/4/8/16 字节、嵌套、10 元）；tuple object ×2；
+  named（含 `int?` 成员）；`Option`；enum；`BTreeMap`；`Vec<u8>`。
 - **named 的顺序不是契约**（§19.4）：C# 按名字序、Rust / C++ 按声明序。现有 3 条 named 用例
   的名字恰好已经是字典序（`id`/`name`、`a`/`b`/`c`、`x`），所以逐字节断言成立；真要加一条
   顺序不同的，只能断言「各自解出同一组值」，不能再比字节 —— 目前还没有这样的行。
@@ -1692,7 +1724,7 @@ crates/binary-tests/tests/common/cases.rs    # 三张表共用的 name → 类�
 |项|C#|C++|Rust|
 |:---|:---|:---|:---|
 |核心源文件|143 `.cs`|52 头（含 experimental）+ 10 源|15 `.rs` + 1 proc-macro|
-|测试规模|188 个测试文件 / 28 个测试项目|44 个测试源文件|153 个用例（含 33 条 C#、27 条 C++ 与 5 条 F# union fixture）+ 27 条 compile-fail 快照 + 4 个 doc test，全部在 `tests/`|
+|测试规模|188 个测试文件 / 28 个测试项目|44 个测试源文件|153 个用例（含 33 条 C#、33 条 C++ 与 5 条 F# union fixture）+ 27 条 compile-fail 快照 + 4 个 doc test，全部在 `tests/`|
 |benchmark|17 个 `Benchmarks.*` 项目（含 `Benchmarks.IntegrationTests`，JIT / AOT 双 generator）|`binary-benchmarks` 四变体（C# JIT / C# AOT / C++ virtual / C++ template）|手写 harness `crates/binary-bench`（wire / objects / collections / errors / profile / lookup 六组，§19）；C# AOT 同口径对照 / C++ union-enum 场景仍缺|
 |编译期诊断|31 条|—|27 条错误路径（全部有快照，§15）|
 
@@ -1893,8 +1925,7 @@ payload 完全复用 tuple object 规则（§11 / §14.1）：
 |`Rect{1,2}`|`03 01000000 02000000`|`03 …`|`03 …`|`03 …`|
 |`Pair(1,"x")`|`04 01000000 0178` / `04 01000000 78`|`04 …`|`04 …`|`04 …`|
 
-四边的 tag 与 payload **全部逐字节相同**。语料落在 `fixtures/csharp.tsv` /
-`cxx.tsv` / `fsharp.tsv`（§12.5），五条 union 行都是 `same` 桶。
+四边的 tag 与 payload **全部逐字节相同**。语料落在 `fixtures/fsharp.tsv`（§12.5）；union 不进共享表（`IUnion` 只在 net11 可用），五条行全部逐字节相同。
 
 C# 与 C++ 的 `Dot` 走的是**手写 converter**，不是库生成的：那两个实现都没有
 「零字节 payload 的 converter」，`[TupleObject] class Dot {}` 抛
@@ -2637,7 +2668,7 @@ dotnet run -c Release --project <project-dir>/Benchmarks.IntegrationTests
 
 一次性、依赖外部 checkout 的 harness 与 fixture 生成程序都不入库：它们只在装有对应仓库的
 机器上可构建（§12.5 讲过同样的理由），机器本地的临时内容统一放在被忽略的缓存目录下。
-需要长期保留的是本节的数字与口径、`crates/binary-bench` 的源码与 `csharp.tsv`；C# 侧正式
+需要长期保留的是本节的数字与口径、`crates/binary-bench` 的源码与 `wire.tsv`；C# 侧正式
 可复现的装置是 `Benchmarks.IntegrationTests`。
 
 ### 19.6 未覆盖
@@ -4213,13 +4244,13 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 |门|命令|结果|
 |:---|:---|:---|
-|全量测试（host）|`cargo test --all`|**157 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 141 + doc 4）+ 27 条 compile-fail 快照|
+|全量测试（host）|`cargo test --all`|**156 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 140 + doc 4）+ 27 条 compile-fail 快照|
 |`no_std + alloc`|`cargo test -p binary --no-default-features`|1 + 11 + doc(4) 通过；六个 `alloc` 容器无条件编译|
 |格式 / lint / 文档|`cargo fmt --all -- --check`、`cargo clippy --all --all-targets -- -D warnings`（含 no-default）、`cargo doc -p binary --no-deps`|全绿、零警告|
-|大端真实二进制|`./scripts/test-multiarch.sh s390x`|157 passed / 0 failed（153 + doc 4）+ ui(27)，`file` 确认真 `ELF 64-bit MSB`|
-|四象限交叉|`./scripts/test-multiarch.sh --all`|7 个 target 各 157 passed / 0 failed，`file` 逐 target 核对 ELF 位宽与端序|
+|大端真实二进制|`./scripts/test-multiarch.sh s390x`|156 passed / 0 failed（152 + doc 4）+ ui(27)，`file` 确认真 `ELF 64-bit MSB`|
+|四象限交叉|`./scripts/test-multiarch.sh --all`|7 个 target 各 156 passed / 0 failed，`file` 逐 target 核对 ELF 位宽与端序|
 |shell 脚本|`./scripts/check-shell.sh`|`scripts/` 下 4 个 shell 脚本：`bash -n` / `shfmt -d` / `shellcheck -S warning` 零发现|
-|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 156 passed / 0 failed（152 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
+|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 155 passed / 0 failed（151 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
 |依赖边界|`cargo tree -e normal -p binary`|只有 `binary → binary-derive`；`trybuild` 仅 dev-dependency|
 |性能剖析（仅 C++ / Rust）|`./scripts/run-benchmark.sh profile` + C++ 侧同测量规则的 harness|两边原生 `u8` 字符串、hex 逐字节相同；数据与热点见 §19.15|
 
@@ -4229,13 +4260,13 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 | target  | Rust triple                     | bits | endian | tests |
 | :------ | :------------------------------ | ---: | :----- | ----: |
-| x86_64  | `x86_64-unknown-linux-gnu`      | 64   | little | 157   |
-| i686    | `i686-unknown-linux-gnu`        | 32   | little | 157   |
-| aarch64 | `aarch64-unknown-linux-gnu`     | 64   | little | 157   |
-| armv7   | `armv7-unknown-linux-gnueabihf` | 32   | little | 157   |
-| riscv64 | `riscv64gc-unknown-linux-gnu`   | 64   | little | 157   |
-| powerpc | `powerpc-unknown-linux-gnu`     | 32   | big    | 157   |
-| s390x   | `s390x-unknown-linux-gnu`       | 64   | big    | 157   |
+| x86_64  | `x86_64-unknown-linux-gnu`      | 64   | little | 156   |
+| i686    | `i686-unknown-linux-gnu`        | 32   | little | 156   |
+| aarch64 | `aarch64-unknown-linux-gnu`     | 64   | little | 156   |
+| armv7   | `armv7-unknown-linux-gnueabihf` | 32   | little | 156   |
+| riscv64 | `riscv64gc-unknown-linux-gnu`   | 64   | little | 156   |
+| powerpc | `powerpc-unknown-linux-gnu`     | 32   | big    | 156   |
+| s390x   | `s390x-unknown-linux-gnu`       | 64   | big    | 156   |
 
 qemu 跑真实 MSB ELF + libc 验**行为与端序**，Miri 解释 MIR 验 `unsafe` 有没有 **UB**，两者
 互补但都不是 soundness 证明（§19.11 / §19.12）。`--no-default-features` 覆盖 `alloc` 层，
@@ -4247,8 +4278,8 @@ qemu 跑真实 MSB ELF + libc 验**行为与端序**，Miri 解释 MIR 验 `unsa
 Miri（host + BE 抽象机）与 `scripts/test-multiarch.sh s390x` 都已重跑并全绿。
 §12.5 补 C++ 语料那一轮只加了 fixture 数据与断言（无 `unsafe`、无库代码改动），
 三个检查仍整轮重跑，本表数字是那一轮的（+2 条 `cxx_fixtures`，ui 快照 +4 是 §19.17 留下的）。
-之后 `binary-cxx` 修容器头宽、重生成 `cxx.tsv`（桶列删除，仍 22 条、仍 2 例断言），
-仓库内只动了 tsv 与断言代码，用例数不变，故上表数字沿用。
+之后 `binary-cxx` 修容器头宽、重生成 `cxx.tsv`（桶列删除，当时 22 条、仍 2 例断言；
+现行为 33 条，见 §12.5），仓库内只动了 tsv 与断言代码，用例数不变，故上表数字沿用。
 §19.15.17 只改了 `Encoder::write` 的 owned 分支与 `write_prefixed_bytes_wide`（安全代码，
 未新增 `unsafe`），wire 不变；测试、`--no-default-features`、clippy（含 no-default）、doc、
 fmt 整轮重跑全绿。Miri（host + BE 抽象机）与 `scripts/test-multiarch.sh s390x` 也整轮重跑：
@@ -4261,6 +4292,10 @@ fmt 整轮重跑全绿。Miri（host + BE 抽象机）与 `scripts/test-multiarc
 `scripts/check-miri.sh` 也从 `miri-check.sh` 改名对齐 `check-*`）；库侧唯一改动是
 `crates/binary-bench/src/harness.rs` 的分配计数器 `AtomicU64` → `AtomicUsize`（32 位
 powerpc 没有 `AtomicU64`，而计数器每次测量前清零，不会溢出）。用例数、wire 都没变。
+`binary-cxx` 补 `std::optional` 那一轮只改 C++ 库与它自己的测试（`OptionalConverter`
+两个 API 各 7 个 case，346 / 171 个 case 全过，s390x 同样全过），Rust 侧只重新生成了
+`cxx.tsv`（27 → 33 条）并把 `CXX_GAP` 清空；`cargo test --all` 仍是 157 passed / 0 failed，
+`s390x` / `powerpc` 各 157 passed，wire 与用例数都没变。
 
 仓库状态：`binary-rust` 仍是零 commit（`git status` 全为 `??`），首次提交前需要一并审阅
 `scripts/`、新增源码与测试 —— 这是发布动作，不是技术欠账，所以不占 §20.3。

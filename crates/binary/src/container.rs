@@ -242,28 +242,16 @@ impl<'de, T: Decode<'de>, const N: usize> Decode<'de> for [T; N] {
 
 // ---- () ----
 
-// A zero-sized type is variable-length: `LEN == 0` is the marker for "no fixed
-// size". Were it a fixed 0-byte size, `Vec<()>` would encode to nothing, the
-// element count could not be recovered and the decode loop would not advance.
-impl Layout for () {
-    const LEN: usize = 0;
-}
-
-impl Encode for () {
-    #[inline]
-    fn encode(&self, _e: &mut Encoder<'_>) -> Result<()> {
-        Ok(())
-    }
-    // Default `encode_with_prefix` takes the `write_prefixed` path and writes a
-    // single `0x00`, so containers can still recover the element count.
-}
-
-impl<'de> Decode<'de> for () {
-    #[inline]
-    fn decode(_d: &mut Decoder<'de>) -> Result<Self> {
-        Ok(())
-    }
-}
+// The unit type is deliberately not convertible, matching the reference C#
+// implementation: there, `System.ValueTuple` throws `ArgumentException` in the
+// reflection generator and reports `BINSRCGEN13` ("Type Not Recognized") in the
+// source generator. The one-byte-per-conversion rule is no part of this
+// decision — it governs the auto forms only (raw forms are unconstrained), and
+// `()` could satisfy it with a bare `0x00` prefix. A zero-field union variant
+// writes only its tag inside the derive and never reaches for `()`, mirroring
+// C#'s empty union case (`IsEmptyUnionCaseType`); a zero-field struct is
+// rejected by `binary-derive`. Zero-length arrays stay convertible: `[T; 0]`
+// below keeps the `LEN == 0` treatment.
 
 // ---- Tuples ----
 
