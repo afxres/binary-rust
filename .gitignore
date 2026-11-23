@@ -4,6 +4,11 @@
 **/*.rs.bk
 Cargo.lock
 
+# Raw profile data from the instrumented doctest binaries: `cargo llvm-cov`
+# does not measure doctests, so those runs write their files into the crate
+# directory instead of the report directory.
+*.profraw
+
 # IDE
 .idea/
 .vscode/

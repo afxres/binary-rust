@@ -1,5 +1,9 @@
 # Binary (Rust)
 
+[![GitHub repo size](https://img.shields.io/github/repo-size/afxres/binary-rust)](#)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/afxres/binary-rust/build.yml?branch=main)](#)
+[![Coverage Status](https://coveralls.io/repos/github/afxres/binary-rust/badge.svg?branch=main)](https://coveralls.io/github/afxres/binary-rust?branch=main)
+
 Serialization library for Rust. It shares its binary layout with the
 [C# version](https://github.com/afxres/binary) and the [C++ version](https://github.com/afxres/binary-cxx):
 data written by one can be read by the other when member names and types match.
