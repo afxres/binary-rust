@@ -71,6 +71,23 @@ struct CjkName {
     n: i32,
 }
 
+/// `rename` takes the *source text* of a string literal and decodes it into
+/// bytes itself, because a `b"..."` splice cannot express non-ASCII text. Every
+/// form the Rust lexer accepts therefore has to survive: simple escapes, hex
+/// and unicode escapes, raw strings with hashes, and line continuations.
+#[derive(Debug, PartialEq, Eq, Encode, Decode)]
+struct LiteralForms {
+    #[binary(rename = "E\t\r\n\0\\\"\'")]
+    escapes: u8,
+    #[binary(rename = "\x41\u{e9}")]
+    hex_unicode: u8,
+    #[binary(rename = r#"raw\q"#)]
+    raw: u8,
+    #[binary(rename = "j\
+        k")]
+    continued: u8,
+}
+
 fn encode_auto<T: Encode>(v: &T) -> Vec<u8> {
     let mut e = Encoder::new();
     v.encode_auto(&mut e).unwrap();
@@ -254,6 +271,35 @@ fn test_derive_rename_non_ascii() {
         [0x0C, 0x06, 0xE5, 0x90, 0x8D, 0xE5, 0xAD, 0x97, 0x04, 7, 0, 0, 0]
     );
     assert_eq!(decode_auto::<CjkName>(&bytes), CjkName { n: 7 });
+}
+
+#[test]
+fn test_derive_rename_accepts_every_literal_form() {
+    let value = LiteralForms {
+        escapes: 1,
+        hex_unicode: 2,
+        raw: 3,
+        continued: 4,
+    };
+    let bytes = encode_auto(&value);
+
+    // 30 payload bytes, past the 16-byte shrink limit, so the header keeps its
+    // 4-byte form. Per member: name prefix, name bytes, value prefix, value.
+    //   "E\t\r\n\0\\\"'"  -> 45 09 0d 0a 00 5c 22 27  (8 bytes)
+    //   "\x41\u{e9}"            -> 41 c3 a9  (3)
+    //   r#"raw\q"#              -> 72 61 77 5c 71  (5)
+    //   "j\\<newline>  k"        -> 6a 6b  (2)
+    assert_eq!(
+        bytes,
+        [
+            0x80, 0x00, 0x00, 0x1E, //
+            0x08, 0x45, 0x09, 0x0D, 0x0A, 0x00, 0x5C, 0x22, 0x27, 0x01, 1, //
+            0x03, 0x41, 0xC3, 0xA9, 0x01, 2, //
+            0x05, 0x72, 0x61, 0x77, 0x5C, 0x71, 0x01, 3, //
+            0x02, 0x6A, 0x6B, 0x01, 4,
+        ]
+    );
+    assert_eq!(decode_auto::<LiteralForms>(&bytes), value);
 }
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]

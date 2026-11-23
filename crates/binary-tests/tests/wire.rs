@@ -905,3 +905,164 @@ fn test_bulk_write_backend_parity() {
         assert_eq!(round, payload, "len {len}: round trip");
     }
 }
+
+#[test]
+fn test_usize_and_isize_use_the_native_width() {
+    // `usize` / `isize` are not in the `impl_fixed!` list: they have their own
+    // impls so the wire width follows the target. The order stays little endian,
+    // so the bytes are `to_le_bytes` on every host.
+    assert_eq!(<usize as Layout>::LEN, core::mem::size_of::<usize>());
+    assert_eq!(<isize as Layout>::LEN, core::mem::size_of::<isize>());
+
+    let n = 0x0102_0304usize;
+    assert_eq!(auto_bytes(&n), n.to_le_bytes());
+    assert_eq!(from_auto::<usize>(&n.to_le_bytes()), n);
+
+    let s = -0x0102_0304isize;
+    assert_eq!(auto_bytes(&s), s.to_le_bytes());
+    assert_eq!(from_auto::<isize>(&s.to_le_bytes()), s);
+
+    // As elements the slice hooks take the bulk arm where the host allows it;
+    // both arms have to agree with the per-scalar wire. Sizes stay under 128 so
+    // the header is one byte on 32- and 64-bit targets alike.
+    let list = vec![1usize, 0x0102_0304, usize::MAX];
+    let mut expected = vec![(list.len() * core::mem::size_of::<usize>()) as u8];
+    for v in &list {
+        expected.extend_from_slice(&v.to_le_bytes());
+    }
+    assert_eq!(auto_bytes(&list), expected);
+    assert_eq!(from_auto::<Vec<usize>>(&expected), list);
+
+    let signed = vec![-1isize, 0, isize::MIN];
+    let mut expected = vec![(signed.len() * core::mem::size_of::<isize>()) as u8];
+    for v in &signed {
+        expected.extend_from_slice(&v.to_le_bytes());
+    }
+    assert_eq!(auto_bytes(&signed), expected);
+    assert_eq!(from_auto::<Vec<isize>>(&expected), signed);
+}
+
+#[test]
+fn test_byte_slice_raw_form_has_no_header() {
+    // `&[u8]` mirrors `[u8]`: the raw form is the bytes alone. The length prefix
+    // belongs to the auto and named forms.
+    let bytes: &[u8] = b"abc";
+    let mut e = Encoder::new();
+    <&[u8] as Encode>::encode(&bytes, &mut e).unwrap();
+    assert_eq!(e.finish().unwrap(), b"abc".to_vec());
+}
+
+#[test]
+fn test_array_of_variable_size_elements() {
+    // `[T; N]` with `T::LEN == 0` has no size estimate, so the header goes
+    // through the compacting `write_prefixed` path; the payload is still every
+    // element through `auto`, with no element count of its own.
+    let arr = [String::from("one"), String::from("two")];
+    assert_eq!(<[String; 2] as Layout>::LEN, 0);
+    assert_eq!(
+        auto_bytes(&arr),
+        with_header(&[0x03, b'o', b'n', b'e', 0x03, b't', b'w', b'o'])
+    );
+    let as_vec = vec![String::from("one"), String::from("two")];
+    assert_eq!(auto_bytes(&arr), auto_bytes(&as_vec));
+}
+
+#[test]
+fn test_array_decode_drops_the_initialised_prefix_on_error() {
+    // The array decoder writes into `MaybeUninit` and has to drop what it did
+    // build when a later element fails: `String` is the shape that would leak.
+    let arr = [String::from("one"), String::from("two")];
+    let bytes = auto_bytes(&arr);
+
+    // A prefix that promises more than is there is caught by the bounded scope
+    // before the array is touched.
+    let mut d = Decoder::new(&bytes[..bytes.len() - 1]);
+    assert_eq!(
+        <[String; 2] as Decode>::decode_auto(&mut d).unwrap_err(),
+        Error::PayloadTruncated
+    );
+
+    // In the raw form the failure lands on the second element, after the first
+    // `String` was built: that one has to be dropped, not leaked.
+    let mut d = Decoder::new(&bytes[1..bytes.len() - 1]);
+    assert_eq!(
+        <[String; 2] as Decode>::decode(&mut d).unwrap_err(),
+        Error::PayloadTruncated
+    );
+}
+
+#[test]
+fn test_option_rejects_an_unknown_tag() {
+    // Only `00` / `01` are tags: anything else is a wire error, not a truthy
+    // value, and both forms say so.
+    let mut d = Decoder::new(&[0x02]);
+    assert_eq!(
+        Option::<i32>::decode(&mut d).unwrap_err(),
+        Error::InvalidTag(2)
+    );
+
+    let mut d = Decoder::new(&[0xff]);
+    assert_eq!(
+        Option::<i32>::decode_auto(&mut d).unwrap_err(),
+        Error::InvalidTag(0xff)
+    );
+}
+
+#[test]
+fn test_decoder_cursor_at_the_end() {
+    // `take_byte` / `peek_byte` both refuse to read past the end, and a peek
+    // never consumes: the following take still sees the same byte.
+    let mut d = Decoder::new(&[]);
+    assert_eq!(d.take_byte().unwrap_err(), Error::NotEnoughBytes);
+    assert_eq!(d.peek_byte().unwrap_err(), Error::NotEnoughBytes);
+
+    let mut d = Decoder::new(&[0x2a]);
+    assert_eq!(d.peek_byte().unwrap(), 0x2a);
+    assert_eq!(d.peek_byte().unwrap(), 0x2a, "peek must not consume");
+    assert_eq!(d.remaining(), 1, "peek must not consume");
+    assert_eq!(d.take_byte().unwrap(), 0x2a);
+    assert_eq!(d.remaining(), 0);
+    assert_eq!(d.peek_byte().unwrap_err(), Error::NotEnoughBytes);
+}
+
+#[test]
+fn test_borrowed_encoder_has_no_finish() {
+    // `finish` consumes an owned encoder and returns its bytes; on a borrowed
+    // one there is nothing to return. The debug form names the backend, so the
+    // two are distinguishable in a failure message.
+    let mut buf = [0u8; 2];
+    let mut e = Encoder::on_slice(&mut buf);
+    e.write(&[7, 8]).unwrap();
+
+    let text = format!("{e:?}");
+    assert!(text.contains("backend: \"borrowed\""), "{text}");
+    assert!(text.contains("capacity: 2"), "{text}");
+
+    assert_eq!(
+        e.finish().unwrap_err(),
+        Error::message_static("cannot finish a borrowed encoder")
+    );
+}
+
+#[test]
+fn test_bulk_write_past_the_committed_prefix() {
+    // `Encoder::new` commits the first 128 bytes ahead of `pos`, so the bulk arm
+    // normally overwrites part of that region. Once `pos` has caught up there is
+    // nothing to overwrite and the payload is appended instead; both shapes must
+    // produce the same bytes.
+    let payload = vec![0xAB; 300];
+
+    let mut e = Encoder::new();
+    e.write(&[0x11; 128]).unwrap();
+    e.write(&payload).unwrap();
+    let appended = e.finish().unwrap();
+
+    let mut e = Encoder::new();
+    e.write(&[0x11; 128]).unwrap();
+    for byte in &payload {
+        e.write(&[*byte]).unwrap();
+    }
+    let per_byte = e.finish().unwrap();
+
+    assert_eq!(appended, per_byte);
+}

@@ -9,7 +9,7 @@
 //! The last section pins the *names* themselves: each variant has to describe
 //! the failure it actually reports (DESIGN §18.9).
 
-use binary::{Decode, Decoder, Encode, Encoder, Error, Layout, Result};
+use binary::{Decode, Decoder, Encode, Encoder, ErasedError, Error, Layout, Result};
 use std::borrow::Cow;
 
 /// A domain error owned by the (simulated) downstream crate.
@@ -503,4 +503,19 @@ fn test_display_text_matches_the_variant_name() {
         Error::MissingMember("id").to_string(),
         "missing required member: id"
     );
+}
+
+#[test]
+fn test_source_chain_reaches_the_payload_from_the_erasure() {
+    // `ErasedError` is public and implements `Error` itself, so a caller holding
+    // the erasure rather than the `Error` wrapper still walks into the payload.
+    let erased = ErasedError::new(BadFrame(3));
+    let src = std::error::Error::source(&erased).expect("the erasure exposes its payload");
+    assert_eq!(src.to_string(), "bad frame 3");
+    assert!(src.downcast_ref::<BadFrame>().is_some());
+
+    // Variants that carry no foreign error report no source at all.
+    assert!(std::error::Error::source(&Error::BufferFull).is_none());
+    assert!(std::error::Error::source(&Error::NotEnoughBytes).is_none());
+    assert!(std::error::Error::source(&Error::message("plain")).is_none());
 }

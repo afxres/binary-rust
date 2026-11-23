@@ -266,3 +266,46 @@ fn test_round_trip_all_container_shapes() {
         expected
     );
 }
+
+#[test]
+fn test_variable_size_elements_take_the_compacting_header() {
+    // `encode_items_with_prefix` has two arms: fixed-size elements reserve the
+    // exact payload, variable-size ones go through `write_prefixed`. The tests
+    // above only reached the first, so pin the second for every container that
+    // shares the helper, plus the `VecDeque` override.
+    let list: LinkedList<String> = ["one", "two"].iter().map(|s| s.to_string()).collect();
+    let deque: VecDeque<String> = ["one", "two"].iter().map(|s| s.to_string()).collect();
+    let set: HashSet<String> = ["one", "two"].iter().map(|s| s.to_string()).collect();
+    let plain = vec!["one".to_string(), "two".to_string()];
+
+    // `to_vec` writes the raw form, which carries no header at all.
+    assert_eq!(to_vec(&list).unwrap(), to_vec(&plain).unwrap());
+    assert_eq!(to_vec(&deque).unwrap(), to_vec(&plain).unwrap());
+
+    // In `auto` position the header appears, and it comes from the shared helper
+    // (or the `VecDeque` override) rather than from `Vec`.
+    assert_eq!(named_bytes(&list), named_bytes(&plain));
+    assert_eq!(named_bytes(&deque), named_bytes(&plain));
+
+    // `HashSet` iterates in its own order, so compare against that same order.
+    let set_in_order: Vec<String> = set.iter().cloned().collect();
+    assert_eq!(named_bytes(&set), named_bytes(&set_in_order));
+
+    assert_eq!(
+        from_slice::<LinkedList<String>>(&to_vec(&list).unwrap()).unwrap(),
+        list
+    );
+    assert_eq!(
+        from_slice::<VecDeque<String>>(&to_vec(&deque).unwrap()).unwrap(),
+        deque
+    );
+}
+
+#[test]
+fn test_cow_auto_form_matches_an_owned_string() {
+    // `Cow` forwards all three forms; the auto one is what a container element
+    // uses, and it must be byte-identical to the owned `String`.
+    let cows: Vec<Cow<'static, str>> = vec![Cow::Borrowed("a"), Cow::Owned("b".to_string())];
+    let owned: Vec<String> = vec!["a".to_string(), "b".to_string()];
+    assert_eq!(to_vec(&cows).unwrap(), to_vec(&owned).unwrap());
+}

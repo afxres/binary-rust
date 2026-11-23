@@ -16,7 +16,7 @@
 # Requires cargo-llvm-cov:  cargo install cargo-llvm-cov --locked
 # Doctests are not measured; covering them needs a nightly toolchain.
 
-set -uo pipefail
+set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 

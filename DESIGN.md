@@ -4245,14 +4245,14 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 |门|命令|结果|
 |:---|:---|:---|
-|全量测试（host）|`cargo test --all`|**150 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 134 + doc 4）+ 28 条 compile-fail 快照|
+|全量测试（host）|`cargo test --all`|**162 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 146 + doc 4）+ 28 条 compile-fail 快照|
 |`no_std + alloc`|`cargo test -p binary --no-default-features`|1 + 11 + doc(4) 通过；六个 `alloc` 容器无条件编译|
 |格式 / lint / 文档|`cargo fmt --all -- --check`、`cargo clippy --all --all-targets -- -D warnings`（含 no-default）、`cargo doc -p binary --no-deps`|全绿、零警告|
-|大端真实二进制|`./scripts/test-multiarch.sh s390x`|150 passed / 0 failed（146 + doc 4）+ ui(28)，`file` 确认真 `ELF 64-bit MSB`|
+|大端真实二进制|`./scripts/test-multiarch.sh s390x`|162 passed / 0 failed（158 + doc 4）+ ui(28)，`file` 确认真 `ELF 64-bit MSB`|
 |位宽 / 端序交叉|`./scripts/test-multiarch.sh`|x86_64 / armv7 / s390x 全绿，`file` 逐 target 核对 ELF 位宽与端序；缺工具链或构建失败一律非零退出|
 |shell 脚本|`./scripts/check-shell.sh`|`scripts/` 下 5 个 shell 脚本：`bash -n` / `shfmt -d` / `shellcheck -S warning` 零发现|
-|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 149 passed / 0 failed（145 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
-|覆盖率|`./scripts/run-coverage.sh`|行覆盖 **85.26%**（2076 行命中 1770、漏 306）：`binary` 14 文件 + `binary-derive`；lcov 落 `target/coverage/lcov.info`，只上报、不设门|
+|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 161 passed / 0 failed（157 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
+|覆盖率|`./scripts/run-coverage.sh`|行覆盖 **90.13%**（2076 行命中 1871、漏 205）：`binary` 14 文件 + `binary-derive`；lcov 落 `target/coverage/lcov.info`，只上报、不设门|
 |CI|`.github/workflows/build.yml`（push 到 `main`）|六个 job：`lint`（fmt / clippy ×2 / doc / shell）、`test`（std 与 no-default）、`msrv`（1.87 check）、`multiarch`（x86_64 / armv7 / s390x）、`miri`、`coverage`（llvm-cov → Coveralls，job 级 `continue-on-error`，不判红）；`workflow_dispatch` 用于不想等 push 时手动整轮|
 |依赖边界|`cargo tree -e normal -p binary`|只有 `binary → binary-derive`；`trybuild` 仅 dev-dependency|
 |性能剖析（仅 C++ / Rust）|`./scripts/run-benchmark.sh profile` + C++ 侧同测量规则的 harness|两边原生 `u8` 字符串、hex 逐字节相同；数据与热点见 §19.15|
@@ -4266,9 +4266,9 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 | target | Rust triple                     | bits | endian | tests |
 | :----- | :------------------------------ | ---: | :----- | ----: |
-| x86_64 | `x86_64-unknown-linux-gnu`      | 64   | little | 150   |
-| armv7  | `armv7-unknown-linux-gnueabihf` | 32   | little | 150   |
-| s390x  | `s390x-unknown-linux-gnu`       | 64   | big    | 150   |
+| x86_64 | `x86_64-unknown-linux-gnu`      | 64   | little | 162   |
+| armv7  | `armv7-unknown-linux-gnueabihf` | 32   | little | 162   |
+| s390x  | `s390x-unknown-linux-gnu`       | 64   | big    | 162   |
 
 qemu 跑真实 MSB ELF + libc 验**行为与端序**，Miri 解释 MIR 验 `unsafe` 有没有 **UB**，两者
 互补但都不是 soundness 证明（§19.11 / §19.12）。`--no-default-features` 覆盖 `alloc` 层，
@@ -4307,13 +4307,25 @@ powerpc 没有 `AtomicU64`，而计数器每次测量前清零，不会溢出）
 job。口径是**只统计产品 crate** —— `crates/binary` + `crates/binary-derive`，
 `crates/binary-tests`（测试套件）与 `crates/binary-bench`（benchmark harness）排除，理由同
 C++ 侧的 `--exclude '*-tests/*'`：算进来等于把测试与 harness 代码当产品代码报百分比。derive
-保留，因为宏体在编译派生类型时真的执行，llvm-cov 能把命中算到它头上
-（`binary-derive/src/lib.rs` 85.71%）。只在 host x86_64 上跑一次，不在三个 target 上重复：
-行覆盖与位宽 / 端序无关，交叉测试的价值在真二进制执行，再算一份只是同样的百分比。行覆盖
-85.26%（2076 行命中 1770、漏 306），最低的 `primitives.rs`（37%）是宏为几十个标量各生成一套
-`impl`、用例只挑了一部分类型，不是有语义没测。Coveralls 只上报不设门：job 级的
-`continue-on-error` 加上传侧的 `fail-on-error: false`，报告服务不稳定时构建仍是绿的，
-`test` job 才是门。
+保留，因为宏体在编译派生类型时真的执行，llvm-cov 能把命中算到它头上。只在 host x86_64 上
+跑一次，不在三个 target 上重复：行覆盖与位宽 / 端序无关，交叉测试的价值在真二进制执行，
+再算一份只是同样的百分比。Coveralls 只上报不设门：job 级的 `continue-on-error` 加上传侧的
+`fail-on-error: false`，报告服务不稳定时构建仍是绿的，`test` job 才是门。
+
+覆盖率补测那一轮：先按 lcov 的逐行数据找缺口，再补 12 条测试（`wire.rs` 8、`collections.rs` 2、
+`errors.rs` 1、`derive.rs` 1），行覆盖 85.26% → **90.13%**（2076 行命中 1871、漏 205），
+用例 150 → 162。补的都是**真行为**，不是凑行数：`usize` / `isize` 此前一条用例都没有（连
+`encode` 都没跑过）；`&[u8]` 的 raw 形式、`[String; N]` 的变长头、数组解码中途失败时的 drop、
+`Option` 的未知 tag、`Decoder::peek_byte`（整个函数从未被调用）、borrowed `Encoder` 的
+`finish` 与 `Debug`、owned 编码器写完 128 字节预留之后的批量写、`ErasedError::source`、
+`Error::source` 的 `None` 分支；derive 那边补了 `rename` 的**字面量解析**（转义序列、`\xNN`、
+`\u{...}`、raw 字符串、续行），这一块以前完全没测过。
+
+剩下 205 行分三类，都不是「少写测试」：`array_len` / `tuple_len` 是 `const fn`，编译期求值，
+运行期命中数恒为 0；`primitives.rs` 那 21 行只在**大端**编译出来（x86_64 上 `cfg!` 走另一支，
+s390x 跑起来才命中）；`Encoder` 的 `LengthTooLarge` 要 >2 GiB 的负载。derive 剩余的一百四十来行
+基本都是诊断路径，每条要一个 compile-fail fixture 才能命中，收益低于维护 28 份快照的成本，
+这轮没补。
 
 仓库状态：`binary-rust` 已有首次提交（`43bc12d`，共享表 + 零元 tuple 禁令）；此前长期停在零
 commit（`git status` 全为 `??`）—— 首次提交是发布动作，不是技术欠账，所以不占 §20.3。
