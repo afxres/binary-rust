@@ -1,17 +1,19 @@
 #!/bin/bash
 #
-# Cross-test the workspace for one or more target architectures.
+# Cross-test the workspace for the three supported target architectures.
 #
-#   bash scripts/test-multiarch.sh                                # host only
-#   bash scripts/test-multiarch.sh x86_64 i686 aarch64 armv7 s390x
-#   bash scripts/test-multiarch.sh --all                          # every known target,
-#                                                                 # skipping missing toolchains
+#   bash scripts/test-multiarch.sh                                # x86_64 armv7 s390x
+#   bash scripts/test-multiarch.sh s390x                          # a single target
 #   bash scripts/test-multiarch.sh --clean s390x                  # rebuild from scratch
 #   bash scripts/test-multiarch.sh s390x -- --test wire_fixtures  # extra cargo args
 #
-# Covered widths: 64-bit little endian (x86_64, aarch64, riscv64), 32-bit little
-# endian (i686, armv7), 64-bit big endian (s390x), 32-bit big endian (powerpc).
-# Add a target by adding one line to `rust_info`.
+# The default set covers each width and endianness that matters: 64-bit little
+# endian (x86_64, native on x86 runners), 32-bit little endian (armv7), 64-bit
+# big endian (s390x). A requested target that cannot be built -- missing cross
+# compiler, sysroot or qemu, or a failing build -- is a hard error: nothing is
+# skipped implicitly, so a green run means every requested target really ran.
+# The other targets in `rust_info` (i686, aarch64, riscv64, powerpc) stay
+# available when named explicitly.
 #
 # Every non-host target gets CARGO_TARGET_<TRIPLE>_LINKER and _RUNNER, so cargo
 # runs the test binaries through qemu-user with that target's sysroot and
@@ -31,14 +33,12 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 LOG_ROOT="${LOG_ROOT:-$PROJECT_ROOT/target/multiarch}"
 
-ALL_TARGETS="x86_64 i686 aarch64 armv7 riscv64 powerpc s390x"
+DEFAULT_TARGETS="x86_64 armv7 s390x"
 CLEAN=0
-ALLOW_MISSING=0
-SKIPPED=0
 FAILED=0
 
 usage() {
-    sed -n '3,27p' "${BASH_SOURCE[0]}" | sed -e 's/^# \{0,1\}//'
+    sed -n '/^# Cross-test/,/^# Environment:/p' "${BASH_SOURCE[0]}" | sed -e 's/^# \{0,1\}//'
 }
 
 # Sets ARCH RUST_TARGET TRIPLE QEMU DEBARCH BITS ENDIAN for a target name or alias.
@@ -92,8 +92,13 @@ run_target() {
     [ "$ARCH" = "$HOST_ARCH" ] && native=1
     local label="$ARCH $RUST_TARGET $BITS-bit $ENDIAN endian"
     local log="$LOG_ROOT/$ARCH.log"
-    local target_dir="$PROJECT_ROOT/target/$RUST_TARGET"
-    [ "$native" -eq 1 ] && target_dir="$PROJECT_ROOT/target"
+    # Ask cargo where the artifacts go; a runner may redirect the target
+    # directory, so target/ next to Cargo.toml is only a fallback.
+    local target_dir
+    target_dir="$(cargo metadata --no-deps --format-version 1 --manifest-path "$PROJECT_ROOT/Cargo.toml" 2>/dev/null |
+        sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+    [ -n "$target_dir" ] || target_dir="$PROJECT_ROOT/target"
+    [ "$native" -eq 1 ] || target_dir="$target_dir/$RUST_TARGET"
     mkdir -p "$LOG_ROOT"
 
     if [ "$native" -eq 0 ]; then
@@ -102,16 +107,9 @@ run_target() {
         [ -d "/usr/$TRIPLE" ] || missing+=("libc6-dev-$DEBARCH-cross")
         command -v "$QEMU" >/dev/null 2>&1 || missing+=("qemu-user")
         if [ "${#missing[@]}" -gt 0 ]; then
-            local hint="missing ${missing[*]}"
-            if [ "$ALLOW_MISSING" -eq 1 ]; then
-                printf 'skip  %s\n      %s\n' "$label" "$hint"
-                record "$ARCH" "$BITS" "$ENDIAN" "-" "skip" "$hint"
-                SKIPPED=$((SKIPPED + 1))
-            else
-                printf 'error %s\n      %s (--allow-missing to skip)\n' "$label" "$hint"
-                record "$ARCH" "$BITS" "$ENDIAN" "-" "error" "$hint"
-                FAILED=1
-            fi
+            printf 'error %s\n      missing %s\n' "$label" "${missing[*]}"
+            record "$ARCH" "$BITS" "$ENDIAN" "-" "error" "missing ${missing[*]}"
+            FAILED=1
             return
         fi
     fi
@@ -143,7 +141,11 @@ run_target() {
         cargo_args+=(--target "$RUST_TARGET")
     fi
 
-    if ! env "${env_args[@]}" cargo "${cargo_args[@]}" "${EXTRA_ARGS[@]}" >"$log" 2>&1; then
+    # The log is a file, so colour would only be escape codes to strip later; a
+    # runner that exports CARGO_TERM_COLOR=always would otherwise hide the lines
+    # this script parses.
+    local run_dir="$PWD"
+    if ! env "${env_args[@]}" CARGO_TERM_COLOR=never cargo "${cargo_args[@]}" "${EXTRA_ARGS[@]}" >"$log" 2>&1; then
         echo "  tests failed"
         grep -E "^(error|warning: unused|failures:)|FAILED" "$log" | head -n 10 | sed -e 's/^/    | /'
         show_tail "$log"
@@ -155,20 +157,37 @@ run_target() {
     local passed
     passed="$(sed -nE 's/^test result: ok\. ([0-9]+) passed.*/\1/p' "$log" | awk '{s += $1} END {print s + 0}')"
 
-    local elf="" status="ok" note=""
+    # cargo reports every binary it ran as "Running <target> (<path>)", so the
+    # ELF check uses exactly those. A cross build logs the host built proc-macro
+    # tests as well, hence the triple filter, and the paths stay relative to the
+    # directory the build ran in, not to where we assume the target directory is.
+    local -a elf_bins=()
     local elf_bin
-    elf_bin="$(find "$target_dir/debug/deps" -maxdepth 1 -type f -executable -name '*-*' 2>/dev/null | head -n 1)"
-    if [ -z "$elf_bin" ]; then
+    while IFS= read -r elf_bin; do
+        case "$elf_bin" in /*) ;; *) elf_bin="$run_dir/$elf_bin" ;; esac
+        if [ "$native" -eq 0 ]; then
+            case "$elf_bin" in */"$RUST_TARGET"/*) ;; *) continue ;; esac
+        fi
+        [ -f "$elf_bin" ] && elf_bins+=("$elf_bin")
+    done < <(sed -n 's/^ *Running .* (\(.*\))$/\1/p' "$log" | sort -u)
+
+    local elf status="ok" note=""
+    if [ "${#elf_bins[@]}" -eq 0 ]; then
         status="error" note="no test binary found"
+        printf '  cwd: %s\n  target: %s\n' "$run_dir" "$target_dir"
+        sed -n '/Running/p' "$log" | head -n 2 | cat -v | sed -e 's/^/  run: /'
     elif ! command -v file >/dev/null 2>&1; then
         note="file not installed, ELF unchecked"
     else
-        elf="$(file -b "$elf_bin")"
-        case "$elf" in
-            *"ELF $BITS-bit LSB"*) [ "$ENDIAN" = little ] || { status="bad-elf" note="ELF reports LSB"; } ;;
-            *"ELF $BITS-bit MSB"*) [ "$ENDIAN" = big ] || { status="bad-elf" note="ELF reports MSB"; } ;;
-            *) status="bad-elf" note="not $BITS-bit" ;;
-        esac
+        for elf_bin in "${elf_bins[@]}"; do
+            elf="$(file -b "$elf_bin")"
+            case "$elf" in
+                *"ELF $BITS-bit LSB"*) [ "$ENDIAN" = little ] || { status="bad-elf" note="${elf_bin##*/} reports LSB"; } ;;
+                *"ELF $BITS-bit MSB"*) [ "$ENDIAN" = big ] || { status="bad-elf" note="${elf_bin##*/} reports MSB"; } ;;
+                *) status="bad-elf" note="${elf_bin##*/} is not $BITS-bit" ;;
+            esac
+            [ "$status" = "ok" ] || break
+        done
     fi
     [ "$status" = "ok" ] || FAILED=1
     printf '  %s tests, elf: %s %s\n' "$passed" "$BITS-bit" "$ENDIAN"
@@ -180,13 +199,8 @@ EXTRA_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         -c | --clean) CLEAN=1 ;;
-        -a | --all)
-            read -r -a TARGETS <<<"$ALL_TARGETS"
-            ALLOW_MISSING=1
-            ;;
-        --allow-missing) ALLOW_MISSING=1 ;;
         -l | --list)
-            echo "$ALL_TARGETS" | tr ' ' '\n'
+            echo "$DEFAULT_TARGETS" | tr ' ' '\n'
             exit 0
             ;;
         -j | --jobs)
@@ -213,7 +227,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-[ "${#TARGETS[@]}" -gt 0 ] || TARGETS=("$HOST_ARCH")
+[ "${#TARGETS[@]}" -gt 0 ] || read -r -a TARGETS <<<"$DEFAULT_TARGETS"
 
 for target in "${TARGETS[@]}"; do
     run_target "$target"
@@ -230,8 +244,4 @@ if [ "$FAILED" -ne 0 ]; then
     printf '\n%s\n' "one or more targets failed"
     exit 1
 fi
-if [ "$SKIPPED" -ne 0 ]; then
-    printf '\n%s\n' "all targets passed, $SKIPPED skipped"
-else
-    printf '\n%s\n' "all targets passed"
-fi
+printf '\n%s\n' "all targets passed"

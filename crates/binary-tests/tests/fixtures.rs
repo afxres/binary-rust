@@ -139,12 +139,12 @@ fn decode_forms(row: &Row) -> Vec<String> {
         }
         if payload.len() / 2 < 128 {
             let narrow = frame(1, payload);
-            if !forms.iter().any(|x| *x == narrow) {
+            if !forms.contains(&narrow) {
                 forms.push(narrow);
             }
         }
         let wide = frame(4, payload);
-        if !forms.iter().any(|x| *x == wide) {
+        if !forms.contains(&wide) {
             forms.push(wide);
         }
     }

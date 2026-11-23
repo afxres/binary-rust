@@ -1,0 +1,108 @@
+name: build
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all --all-targets -- -D warnings
+
+      - name: Clippy (no default features)
+        run: cargo clippy -p binary --no-default-features -- -D warnings
+
+      - name: Docs
+        run: cargo doc -p binary --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Shell scripts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shfmt
+          bash scripts/check-shell.sh
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test (std + derive)
+        run: cargo test --all
+
+      - name: Test (no_std + alloc)
+        run: cargo test -p binary --no-default-features
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.87"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check against the declared MSRV
+        run: cargo check --workspace
+
+  multiarch:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64
+            packages: ""
+          - target: armv7
+            packages: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+          - target: s390x
+            packages: gcc-s390x-linux-gnu libc6-dev-s390x-cross
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross toolchain and qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user ${{ matrix.packages }}
+
+      - name: Test ${{ matrix.target }}
+        run: bash scripts/test-multiarch.sh ${{ matrix.target }}
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Miri (host + big-endian abstract machine)
+        run: bash scripts/check-miri.sh

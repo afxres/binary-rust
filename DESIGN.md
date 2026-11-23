@@ -1057,7 +1057,7 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 |:---|:---|
 |`crates/binary-bench`|手写 harness、零依赖、`publish = false`；六组：`wire`（三边同 payload，只留 C# / C++ 也测的四行，打 hex + ns/op）、`objects`、`collections`、`errors`、`profile`、`lookup`，见 §19|
 |`scripts/run-benchmark.sh`|构建并运行上面六组之一，默认 `wire`；`lookup` 另接受 `full` 出完整矩阵|
-|`scripts/test-multiarch.sh`|七个 target 的四象限交叉，每个 target 自己的 qemu-user runner + sysroot，见 §20.1|
+|`scripts/test-multiarch.sh`|默认三个 target 的位宽 / 端序交叉（x86_64 / armv7 / s390x），缺工具链即报错；每个 target 自己的 qemu-user runner + sysroot，见 §20.1|
 |`scripts/check-miri.sh`|nightly + Miri 的 UB 检查（host + s390x 抽象机），见 §19.12|
 |`scripts/check-shell.sh`|`bash -n` + `shfmt -d` + `shellcheck` 三个门（只扫 `scripts/`），见 §20.1|
 
@@ -4244,29 +4244,29 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 |门|命令|结果|
 |:---|:---|:---|
-|全量测试（host）|`cargo test --all`|**156 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 140 + doc 4）+ 27 条 compile-fail 快照|
+|全量测试（host）|`cargo test --all`|**150 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 134 + doc 4）+ 28 条 compile-fail 快照|
 |`no_std + alloc`|`cargo test -p binary --no-default-features`|1 + 11 + doc(4) 通过；六个 `alloc` 容器无条件编译|
 |格式 / lint / 文档|`cargo fmt --all -- --check`、`cargo clippy --all --all-targets -- -D warnings`（含 no-default）、`cargo doc -p binary --no-deps`|全绿、零警告|
-|大端真实二进制|`./scripts/test-multiarch.sh s390x`|156 passed / 0 failed（152 + doc 4）+ ui(27)，`file` 确认真 `ELF 64-bit MSB`|
-|四象限交叉|`./scripts/test-multiarch.sh --all`|7 个 target 各 156 passed / 0 failed，`file` 逐 target 核对 ELF 位宽与端序|
+|大端真实二进制|`./scripts/test-multiarch.sh s390x`|150 passed / 0 failed（146 + doc 4）+ ui(28)，`file` 确认真 `ELF 64-bit MSB`|
+|位宽 / 端序交叉|`./scripts/test-multiarch.sh`|x86_64 / armv7 / s390x 全绿，`file` 逐 target 核对 ELF 位宽与端序；缺工具链或构建失败一律非零退出|
 |shell 脚本|`./scripts/check-shell.sh`|`scripts/` 下 4 个 shell 脚本：`bash -n` / `shfmt -d` / `shellcheck -S warning` 零发现|
-|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 155 passed / 0 failed（151 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
+|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 149 passed / 0 failed（145 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
+|CI|`.github/workflows/build.yml`（push 到 `main`）|五个 job：`lint`（fmt / clippy ×2 / doc / shell）、`test`（std 与 no-default）、`msrv`（1.87 check）、`multiarch`（x86_64 / armv7 / s390x）、`miri`；`workflow_dispatch` 用于合并前手动整轮|
 |依赖边界|`cargo tree -e normal -p binary`|只有 `binary → binary-derive`；`trybuild` 仅 dev-dependency|
 |性能剖析（仅 C++ / Rust）|`./scripts/run-benchmark.sh profile` + C++ 侧同测量规则的 harness|两边原生 `u8` 字符串、hex 逐字节相同；数据与热点见 §19.15|
 
-四象限由 `scripts/test-multiarch.sh --all` 一次跑完（本机 35 s，构建已缓存）：每个 target
-只在自己的 sysroot 下链接、自己的 qemu-user 里执行，`binfmt_misc` 不参与；脚本再把
-`file` 读回的 ELF 位宽 / 端序与声明比对，标错 target 不会静默通过。
+三个默认 target（x86_64 / armv7 / s390x）由 `scripts/test-multiarch.sh` 一次跑完（构建已缓存）：
+每个 target 只在自己的 sysroot 下链接、自己的 qemu-user 里执行，`binfmt_misc` 不参与；脚本
+再把 `file` 读回的 ELF 位宽 / 端序与声明比对，标错 target 不会静默通过。缺交叉编译器、sysroot
+或 qemu-user 的 target 直接报错退出，脚本不做隐式跳过，所以「全绿」等于「请求的每个 target
+都真的构建并跑过」。其余 target（i686 / aarch64 / riscv64 / powerpc）仍可显式指定，CI 只跑
+默认三个。
 
-| target  | Rust triple                     | bits | endian | tests |
-| :------ | :------------------------------ | ---: | :----- | ----: |
-| x86_64  | `x86_64-unknown-linux-gnu`      | 64   | little | 156   |
-| i686    | `i686-unknown-linux-gnu`        | 32   | little | 156   |
-| aarch64 | `aarch64-unknown-linux-gnu`     | 64   | little | 156   |
-| armv7   | `armv7-unknown-linux-gnueabihf` | 32   | little | 156   |
-| riscv64 | `riscv64gc-unknown-linux-gnu`   | 64   | little | 156   |
-| powerpc | `powerpc-unknown-linux-gnu`     | 32   | big    | 156   |
-| s390x   | `s390x-unknown-linux-gnu`       | 64   | big    | 156   |
+| target | Rust triple                     | bits | endian | tests |
+| :----- | :------------------------------ | ---: | :----- | ----: |
+| x86_64 | `x86_64-unknown-linux-gnu`      | 64   | little | 150   |
+| armv7  | `armv7-unknown-linux-gnueabihf` | 32   | little | 150   |
+| s390x  | `s390x-unknown-linux-gnu`       | 64   | big    | 150   |
 
 qemu 跑真实 MSB ELF + libc 验**行为与端序**，Miri 解释 MIR 验 `unsafe` 有没有 **UB**，两者
 互补但都不是 soundness 证明（§19.11 / §19.12）。`--no-default-features` 覆盖 `alloc` 层，
@@ -4296,9 +4296,12 @@ powerpc 没有 `AtomicU64`，而计数器每次测量前清零，不会溢出）
 两个 API 各 7 个 case，346 / 171 个 case 全过，s390x 同样全过），Rust 侧只重新生成了
 `cxx.tsv`（27 → 33 条）并把 `CXX_GAP` 清空；`cargo test --all` 仍是 157 passed / 0 failed，
 `s390x` / `powerpc` 各 157 passed，wire 与用例数都没变。
+共享表合并 + 零元 tuple 禁令那一轮：用例 157 → 150（fixture 二进制 3 → 2 合并掉 1 条，`wire.rs`
+50 → 44 删掉 6 条钉住 `()` 的测试），ui 快照 27 → 28（新增 `unit_tuple` compile-fail）；上表
+随之改为 150 / 149。x86_64 / armv7 / s390x 三个 target 与 Miri（host + BE）都已重跑全绿。
 
-仓库状态：`binary-rust` 仍是零 commit（`git status` 全为 `??`），首次提交前需要一并审阅
-`scripts/`、新增源码与测试 —— 这是发布动作，不是技术欠账，所以不占 §20.3。
+仓库状态：`binary-rust` 已有首次提交（`43bc12d`，共享表 + 零元 tuple 禁令）；此前长期停在零
+commit（`git status` 全为 `??`）—— 首次提交是发布动作，不是技术欠账，所以不占 §20.3。
 
 ### 20.2 已定型、不再重复讨论的决策
 
