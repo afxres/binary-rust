@@ -1059,6 +1059,7 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 |`scripts/run-benchmark.sh`|构建并运行上面六组之一，默认 `wire`；`lookup` 另接受 `full` 出完整矩阵|
 |`scripts/test-multiarch.sh`|默认三个 target 的位宽 / 端序交叉（x86_64 / armv7 / s390x），缺工具链即报错；每个 target 自己的 qemu-user runner + sysroot，见 §20.1|
 |`scripts/check-miri.sh`|nightly + Miri 的 UB 检查（host + s390x 抽象机），见 §19.12|
+|`scripts/run-coverage.sh`|`cargo llvm-cov` 的行覆盖 → `target/coverage/lcov.info`（lcov，交给 Coveralls），只算产品 crate，见 §20.1|
 |`scripts/check-shell.sh`|`bash -n` + `shfmt -d` + `shellcheck` 三个门（只扫 `scripts/`），见 §20.1|
 
 ### 9.5 实现中确认的语义（对照 C# / C++ 源码）
@@ -4249,9 +4250,10 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 |格式 / lint / 文档|`cargo fmt --all -- --check`、`cargo clippy --all --all-targets -- -D warnings`（含 no-default）、`cargo doc -p binary --no-deps`|全绿、零警告|
 |大端真实二进制|`./scripts/test-multiarch.sh s390x`|150 passed / 0 failed（146 + doc 4）+ ui(28)，`file` 确认真 `ELF 64-bit MSB`|
 |位宽 / 端序交叉|`./scripts/test-multiarch.sh`|x86_64 / armv7 / s390x 全绿，`file` 逐 target 核对 ELF 位宽与端序；缺工具链或构建失败一律非零退出|
-|shell 脚本|`./scripts/check-shell.sh`|`scripts/` 下 4 个 shell 脚本：`bash -n` / `shfmt -d` / `shellcheck -S warning` 零发现|
+|shell 脚本|`./scripts/check-shell.sh`|`scripts/` 下 5 个 shell 脚本：`bash -n` / `shfmt -d` / `shellcheck -S warning` 零发现|
 |UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 149 passed / 0 failed（145 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
-|CI|`.github/workflows/build.yml`（push 到 `main`）|五个 job：`lint`（fmt / clippy ×2 / doc / shell）、`test`（std 与 no-default）、`msrv`（1.87 check）、`multiarch`（x86_64 / armv7 / s390x）、`miri`；`workflow_dispatch` 用于合并前手动整轮|
+|覆盖率|`./scripts/run-coverage.sh`|行覆盖 **85.26%**（2076 行命中 1770、漏 306）：`binary` 14 文件 + `binary-derive`；lcov 落 `target/coverage/lcov.info`，只上报、不设门|
+|CI|`.github/workflows/build.yml`（push 到 `main`）|六个 job：`lint`（fmt / clippy ×2 / doc / shell）、`test`（std 与 no-default）、`msrv`（1.87 check）、`multiarch`（x86_64 / armv7 / s390x）、`miri`、`coverage`（llvm-cov → Coveralls，job 级 `continue-on-error`，不判红）；`workflow_dispatch` 用于手动整轮|
 |依赖边界|`cargo tree -e normal -p binary`|只有 `binary → binary-derive`；`trybuild` 仅 dev-dependency|
 |性能剖析（仅 C++ / Rust）|`./scripts/run-benchmark.sh profile` + C++ 侧同测量规则的 harness|两边原生 `u8` 字符串、hex 逐字节相同；数据与热点见 §19.15|
 
@@ -4299,6 +4301,19 @@ powerpc 没有 `AtomicU64`，而计数器每次测量前清零，不会溢出）
 共享表合并 + 零元 tuple 禁令那一轮：用例 157 → 150（fixture 二进制 3 → 2 合并掉 1 条，`wire.rs`
 50 → 44 删掉 6 条钉住 `()` 的测试），ui 快照 27 → 28（新增 `unit_tuple` compile-fail）；上表
 随之改为 150 / 149。x86_64 / armv7 / s390x 三个 target 与 Miri（host + BE）都已重跑全绿。
+
+覆盖率那一轮只加装置、不动库：`scripts/run-coverage.sh`（`cargo llvm-cov` →
+`target/coverage/lcov.info`，和 `target/` 下其它构建产物一起，不入库）与 CI 的 `coverage`
+job。口径是**只统计产品 crate** —— `crates/binary` + `crates/binary-derive`，
+`crates/binary-tests`（测试套件）与 `crates/binary-bench`（benchmark harness）排除，理由同
+C++ 侧的 `--exclude '*-tests/*'`：算进来等于把测试与 harness 代码当产品代码报百分比。derive
+保留，因为宏体在编译派生类型时真的执行，llvm-cov 能把命中算到它头上
+（`binary-derive/src/lib.rs` 85.71%）。只在 host x86_64 上跑一次，不在三个 target 上重复：
+行覆盖与位宽 / 端序无关，交叉测试的价值在真二进制执行，再算一份只是同样的百分比。行覆盖
+85.26%（2076 行命中 1770、漏 306），最低的 `primitives.rs`（37%）是宏为几十个标量各生成一套
+`impl`、用例只挑了一部分类型，不是有语义没测。Coveralls 只上报不设门：job 级的
+`continue-on-error` 加上传侧的 `fail-on-error: false`，报告服务不稳定时构建仍是绿的，
+`test` job 才是门。
 
 仓库状态：`binary-rust` 已有首次提交（`43bc12d`，共享表 + 零元 tuple 禁令）；此前长期停在零
 commit（`git status` 全为 `??`）—— 首次提交是发布动作，不是技术欠账，所以不占 §20.3。

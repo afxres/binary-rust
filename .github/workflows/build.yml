@@ -106,3 +106,33 @@ jobs:
 
       - name: Miri (host + big-endian abstract machine)
         run: bash scripts/check-miri.sh
+
+  coverage:
+    # A report, not a gate: the `test` job is the gate. A flaky Coveralls
+    # upload, an unparsable lcov file or a failed cargo-llvm-cov install must
+    # not turn a green build red, so the job itself is non-blocking and the
+    # upload additionally runs with fail-on-error: false.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Coverage
+        run: bash scripts/run-coverage.sh
+
+      - name: Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          fail-on-error: false
+          file: target/coverage/lcov.info

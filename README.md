@@ -186,6 +186,7 @@ lifetime parameter for borrowed structs.
 cargo test --all                      # unit, integration, derive UI and doc tests
 bash scripts/run-benchmark.sh         # one of wire | objects | collections | errors | profile | lookup
 bash scripts/test-multiarch.sh        # x86_64 / armv7 / s390x
+bash scripts/run-coverage.sh          # lcov -> target/coverage/lcov.info
 ```
 
 `DESIGN.md` holds the rationale for every decision above, including the measurements behind the
