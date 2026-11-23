@@ -171,7 +171,7 @@ extra annotation; maps and sets are written as `(K, V)` entries. Decoding a borr
   (`Error::message`, `Error::message_static`, `Error::wrapped`), so `?` stays cheap and
   `core::error::Error::source()` still works.
 - **Byte-level compatibility is tested, not assumed**: 74 rows of the shared cross-language wire
-  fixture table and 5 F# union fixtures are asserted byte for byte, and 27 compile-fail snapshots
+  fixture table and 5 F# union fixtures are asserted byte for byte, and 28 compile-fail snapshots
   pin the derive's diagnostics (message, caret position, no duplicates).
 - **Benchmarks are in the repo** (`crates/binary-bench`): wire, object, collection, error, profile
   and named-key lookup groups, reusing the payloads the C# and C++ benchmark devices use.

@@ -4253,7 +4253,7 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 |shell 脚本|`./scripts/check-shell.sh`|`scripts/` 下 5 个 shell 脚本：`bash -n` / `shfmt -d` / `shellcheck -S warning` 零发现|
 |UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 149 passed / 0 failed（145 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
 |覆盖率|`./scripts/run-coverage.sh`|行覆盖 **85.26%**（2076 行命中 1770、漏 306）：`binary` 14 文件 + `binary-derive`；lcov 落 `target/coverage/lcov.info`，只上报、不设门|
-|CI|`.github/workflows/build.yml`（push 到 `main`）|六个 job：`lint`（fmt / clippy ×2 / doc / shell）、`test`（std 与 no-default）、`msrv`（1.87 check）、`multiarch`（x86_64 / armv7 / s390x）、`miri`、`coverage`（llvm-cov → Coveralls，job 级 `continue-on-error`，不判红）；`workflow_dispatch` 用于手动整轮|
+|CI|`.github/workflows/build.yml`（push 到 `main`）|六个 job：`lint`（fmt / clippy ×2 / doc / shell）、`test`（std 与 no-default）、`msrv`（1.87 check）、`multiarch`（x86_64 / armv7 / s390x）、`miri`、`coverage`（llvm-cov → Coveralls，job 级 `continue-on-error`，不判红）；`workflow_dispatch` 用于不想等 push 时手动整轮|
 |依赖边界|`cargo tree -e normal -p binary`|只有 `binary → binary-derive`；`trybuild` 仅 dev-dependency|
 |性能剖析（仅 C++ / Rust）|`./scripts/run-benchmark.sh profile` + C++ 侧同测量规则的 harness|两边原生 `u8` 字符串、hex 逐字节相同；数据与热点见 §19.15|
 
