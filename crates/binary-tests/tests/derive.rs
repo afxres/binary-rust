@@ -769,3 +769,29 @@ fn test_with_converter_rejects_malformed_payload() {
         "odd hex length"
     );
 }
+
+/// A type-level marker is not part of the wire: `PhantomData` has no converter,
+/// so the field is skipped while the lifetime parameter still parses. Without
+/// `skip` this is a compile error — see `tests/ui/phantom_data.rs`.
+#[derive(Debug, PartialEq, Eq, Encode, Decode)]
+struct BorrowedView<'a> {
+    id: u8,
+    #[binary(skip)]
+    marker: core::marker::PhantomData<&'a ()>,
+}
+
+#[test]
+fn test_phantom_data_field_is_skipped() {
+    let value = BorrowedView {
+        id: 7,
+        marker: core::marker::PhantomData,
+    };
+    let bytes = encode_auto(&value);
+    // Object prefix (5 bytes of payload), then `id` only: the marker writes
+    // neither a name nor a value.
+    assert_eq!(bytes, [5, 2, b'i', b'd', 1, 7]);
+    // Decoded through the decoder directly: `decode_auto` above requires
+    // `for<'de>`, which a lifetime-carrying type does not satisfy.
+    let mut d = Decoder::new(&bytes);
+    assert_eq!(BorrowedView::decode_auto(&mut d).unwrap(), value);
+}

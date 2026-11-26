@@ -661,12 +661,12 @@ struct Person {
    宏拿到的 token 流已经被嚼掉一段类型，只会生成缺字段的初始化式并被 E0063 兜住。
    这条路径不值得写用例（会钉住 rustc 的措辞）。
 
-负向测试：`crates/binary-tests/tests/ui/` 的 **27 个 compile-fail fixture + `.stderr` 快照**，
+负向测试：`crates/binary-tests/tests/ui/` 的 **29 个 compile-fail fixture + `.stderr` 快照**，
 由 `trybuild` 驱动（**仅 dev-dependency**，`cargo tree -e normal` 仍然只有
 `binary → binary-derive`）。快照同时钉住三件事：文案、caret 位置、以及「每个错误只报一次」。
 
 校验能力差距：C# 的 source generator 有 **31 条专用诊断**（Key 重复、TupleKey 不连续、
-required 成员缺 Key、多重属性冲突…），Rust 现有 **27 条已钉住的错误路径**：
+required 成员缺 Key、多重属性冲突…），Rust 现有 **29 条已钉住的错误路径**：
 重复 wire name / 未知结构体级选项 / 冲突的布局模式 / 未知字段选项 / `rename` 非字面量 /
 tuple 带成员属性 / 枚举缺 `int` / `int` 用在结构体 / `tuple` 用在枚举 / Rust `union` 类型 /
 tuple struct / unit struct / 泛型结构体 / 泛型枚举 / 空结构体 / 空枚举 / 带字段的变体 /
@@ -933,7 +933,7 @@ let __m = NamedMembers::<2>::parse(d, |name| match name {
 |`IsolatedConverter` / `IVariableConverterFunctions`|换成包装类型 `With<C, T>`|
 |`SpanLike` adapter（ArraySegment / Memory / ...）|放弃，`&[u8]` / `Vec<u8>` / `Cow` 够了|
 |`Converter.Stream` 系列|v1 不做，需要时加 `Read`/`Write` 适配层|
-|.NET 专有类型：`decimal` / `Guid` / `DateTime` / `DateTimeOffset` / `TimeSpan` / `DateOnly` / `TimeOnly` / `BigInteger` / `BitArray` / `IPAddress` / `IPEndPoint` / `Version` / `Uri` / `Half` / `System.Numerics` 全家桶|**不追求 wire 对齐**。C++ 侧也没有这些类型，跨语言本来用不上；Rust 的等价类型（`SystemTime`/`Duration`/`IpAddr`/`Uuid` 等）语义也不同。需要时由使用方 crate 自己 impl `Encode`/`Decode`（`Binary.Experimental` 也不算参考实现）|
+|.NET 专有类型：`decimal` / `Guid` / `DateTime` / `DateTimeOffset` / `TimeSpan` / `DateOnly` / `TimeOnly` / `BigInteger` / `BitArray` / `IPAddress` / `IPEndPoint` / `Version` / `Uri` / `Half` / `System.Numerics` 全家桶|**不追求 wire 对齐**。C++ 侧也没有这些类型，跨语言本来用不上；Rust 的等价类型（`SystemTime`/`Duration`/`IpAddr` 等）语义也不同。UUID 在 Rust 侧**没有 std 类型**，只有 `uuid` crate（`uuid::Uuid`）：`as_bytes()` 按 RFC 4122 大端序给 16 字节，而 C# `Guid.TryWriteBytes` 的 Data1/Data2/Data3 是混合端序 —— fixture 里 `d47ba8473c05c547…` 对应的 GUID 是 `47a87bd4-053c-47c5-…`，同一个值两边字节就不同，所以这里不是「语义差异」而是字节差异。需要时由使用方 crate 自己 impl `Encode`/`Decode`（`Binary.Experimental` 也不算参考实现）|
 
 动态层 v1 不做。这里要记清楚**为什么「只加一个 object-safe 的编码 trait」不够**——早期草稿
 里真加过 `EncodeDyn`（`encode_dyn` → `e.auto(self)`，blanket impl），结果是死代码，0.1 前删掉：
@@ -1820,7 +1820,7 @@ struct Error { msg: String, span: Span }   // 取代裸 String
 （分别指向 `Encode` 和 `Decode`），用户看到两条重复错误；现在 span 与文案完全相同，
 rustc 直接合并成一条。
 
-### 15.2 compile-fail fixture（当时 23 个，现 27 个）
+### 15.2 compile-fail fixture（当时 23 个，现 29 个）
 
 `crates/binary-tests/tests/ui.rs`：
 
@@ -4089,7 +4089,7 @@ C++ `FixedConverterPolicy` / `std::span`），Rust 缺的是 derive 的入口。
 
 公开 API 零新增：`write_named_member`、`Encoder::write_prefixed_bounded`、`Decoder::new`、
 `Decoder::with_prefix` 都是现成的。字段类型不必实现 `Layout` —— 那正是孤儿规则下外部类型
-（`SystemTime` / `Uuid` / `Decimal`）的常态，也是这条属性存在的唯一理由。
+（`SystemTime` / `uuid::Uuid` / `Decimal`）的常态，也是这条属性存在的唯一理由。
 
 **代价**：`to()` 必然构造一个 `Repr` 值，`Repr = String` 这类转换会分配。记录在案，不做
 零分配变体：真出现热点，再加「函数式转换器」作为第二个入口，属性语法不变。
@@ -4236,6 +4236,43 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 ---
 
+### 19.19 不实现 `NonZero*`，`Option<T>` 不做 niche 特化（2026-11-26，用户裁定）
+
+考虑过给 12 个 `core::num::NonZero*` 加 `Layout` / `Encode` / `Decode`（wire 与内层整数逐位
+相同、解码拒绝零），结论是不收。
+
+不收录的理由（按分量排）：
+
+1. **`Option<NonZero*>` 的 4 字节是内存布局，不是序列化契约。**
+   `size_of::<Option<NonZeroU32>>() == 4` 来自 niche 优化（0 不是合法值，空位借给 `None`），
+   编译器不保证，wire 不该继承。写进格式等于让持久化字节依赖编译器优化。
+2. **落不进现有的泛型 impl。** `impl<T: Encode> Encode for Option<T>` 已覆盖全部 `T`，stable
+   没有特化（给 `T: NonZero*` 再写一份是 E0119），只能在同一个 impl 内部按 `T` 的关联常量
+   分叉。分叉要三样新机制：一个公开的「`T` 的 0 是否非法」开关（与 §19.16 删掉的
+   `Layout::POD` 同形：公开、写错静默改格式、编译器一条也不查）、一个从 repr 造值的构造器
+   （`0 → None`）、以及 `Option<T>::LEN` 随 `T` 变（否则 `Vec<Option<..>>` 走错分支、元素
+   计数全错）。
+3. **同一泛型会出现两种形状。** `Option<u32>` 是 5 / 1 字节，`Option<NonZeroU32>` 若变
+   4 / 4，文档就得写「除 `T` 为 `NonZero*` 时」，正是 §19.16 反对的「容器按类型查开关」。
+4. **三边没有对应物。** C# 的 `T?`、C++ 的 `std::optional<T>` 恒为 `tag + value`，Rust 独有的
+   形状只能在 wire 表里记成「仅 Rust 例外」，跨语言互验直接断掉。
+5. **单独收 `NonZero*`、不动 `Option` 也不划算。** wire 与内层整数逐位相同、解码拒绝零，
+   代价确实小，但收益只是「省一次手写 impl」；而它一旦存在，使用方就会期待
+   `Option<NonZero*>` 也是 4 字节，把上面四条重新拉回台面。宁可没有，也不要一个半截的语义。
+
+所以 `Option<NonZeroU32>` 的 wire 恒为 **5 字节 / 1 字节**（`01` + 4 字节小端 / `00`），与
+`Option<u32>` 同形。真要「4 字节、0 当 `None`」，让**类型**承载形状，而不是给通用
+`Option<T>` 开洞：使用方用 `#[binary(with = "m")]` 把字段映射到 `u32`，在 `to` / `from` 里做
+`0 ↔ None`（§19.17）；或将来由本库提供专用包装类型。
+
+顺带钉住一条实测约束：**`#[binary(optional)]` 不能与 `NonZero*` 组合**，而且不是「缺个
+`Default`」——编码侧比较字段类型的 `Default`，解码侧成员缺失时也要**造出一个值**，这种类型
+没有「缺省值」；加 `with` 也救不了（`optional` 的比较对象是字段类型而非 `Repr`，见 §19.17 的
+成员表）。唯一写法是 `Option<NonZero*>`（缺失 = `None`），此时 `optional` 只剩「`None` 时连
+成员名也不写」这一层收益。
+
+---
+
 ## 20. 当前状态与质量门（2026-11-09）
 
 本节是全文档唯一**活的状态表**。§9 / §13 / §19.x 里的日期、计数与「尚未」字样都是当时的
@@ -4245,13 +4282,13 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 |门|命令|结果|
 |:---|:---|:---|
-|全量测试（host）|`cargo test --all`|**162 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 146 + doc 4）+ 28 条 compile-fail 快照|
+|全量测试（host）|`cargo test --all`|**163 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 147 + doc 4）+ 29 条 compile-fail 快照|
 |`no_std + alloc`|`cargo test -p binary --no-default-features`|1 + 11 + doc(4) 通过；六个 `alloc` 容器无条件编译|
 |格式 / lint / 文档|`cargo fmt --all -- --check`、`cargo clippy --all --all-targets -- -D warnings`（含 no-default）、`cargo doc -p binary --no-deps`|全绿、零警告|
-|大端真实二进制|`./scripts/test-multiarch.sh s390x`|162 passed / 0 failed（158 + doc 4）+ ui(28)，`file` 确认真 `ELF 64-bit MSB`|
+|大端真实二进制|`./scripts/test-multiarch.sh s390x`|163 passed / 0 failed（159 + doc 4）+ ui(29)，`file` 确认真 `ELF 64-bit MSB`|
 |位宽 / 端序交叉|`./scripts/test-multiarch.sh`|x86_64 / armv7 / s390x 全绿，`file` 逐 target 核对 ELF 位宽与端序；缺工具链或构建失败一律非零退出|
 |shell 脚本|`./scripts/check-shell.sh`|`scripts/` 下 5 个 shell 脚本：`bash -n` / `shfmt -d` / `shellcheck -S warning` 零发现|
-|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 161 passed / 0 failed（157 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
+|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 162 passed / 0 failed（158 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
 |覆盖率|`./scripts/run-coverage.sh`|行覆盖 **90.13%**（2076 行命中 1871、漏 205）：`binary` 14 文件 + `binary-derive`；lcov 落 `target/coverage/lcov.info`，只上报、不设门|
 |CI|`.github/workflows/build.yml`（push 到 `main`）|六个 job：`lint`（fmt / clippy ×2 / doc / shell）、`test`（std 与 no-default）、`msrv`（1.87 check）、`multiarch`（x86_64 / armv7 / s390x）、`miri`、`coverage`（llvm-cov → Coveralls，job 级 `continue-on-error`，不判红）；`workflow_dispatch` 用于不想等 push 时手动整轮|
 |依赖边界|`cargo tree -e normal -p binary`|只有 `binary → binary-derive`；`trybuild` 仅 dev-dependency|
@@ -4266,9 +4303,9 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 | target | Rust triple                     | bits | endian | tests |
 | :----- | :------------------------------ | ---: | :----- | ----: |
-| x86_64 | `x86_64-unknown-linux-gnu`      | 64   | little | 162   |
-| armv7  | `armv7-unknown-linux-gnueabihf` | 32   | little | 162   |
-| s390x  | `s390x-unknown-linux-gnu`       | 64   | big    | 162   |
+| x86_64 | `x86_64-unknown-linux-gnu`      | 64   | little | 163   |
+| armv7  | `armv7-unknown-linux-gnueabihf` | 32   | little | 163   |
+| s390x  | `s390x-unknown-linux-gnu`       | 64   | big    | 163   |
 
 qemu 跑真实 MSB ELF + libc 验**行为与端序**，Miri 解释 MIR 验 `unsafe` 有没有 **UB**，两者
 互补但都不是 soundness 证明（§19.11 / §19.12）。`--no-default-features` 覆盖 `alloc` 层，
@@ -4301,6 +4338,9 @@ powerpc 没有 `AtomicU64`，而计数器每次测量前清零，不会溢出）
 共享表合并 + 零元 tuple 禁令那一轮：用例 157 → 150（fixture 二进制 3 → 2 合并掉 1 条，`wire.rs`
 50 → 44 删掉 6 条钉住 `()` 的测试），ui 快照 27 → 28（新增 `unit_tuple` compile-fail）；上表
 随之改为 150 / 149。x86_64 / armv7 / s390x 三个 target 与 Miri（host + BE）都已重跑全绿。
+拒绝 `PhantomData` 那一轮同样只加测试：`tests/derive.rs` 一条（集成 146 → 147）、
+`tests/ui/phantom_data.rs` 一条快照（28 → 29），库代码与 wire 未动；host 全量、三个 target
+与 Miri（host + BE）都已重跑，上表随之改为 163 / ui(29)。
 
 覆盖率那一轮只加装置、不动库：`scripts/run-coverage.sh`（`cargo llvm-cov` →
 `target/coverage/lcov.info`，和 `target/` 下其它构建产物一起，不入库）与 CI 的 `coverage`
@@ -4414,6 +4454,18 @@ commit（`git status` 全为 `??`）—— 首次提交是发布动作，不是�
   这两条入口，成员类型换成它们即可。解码器不替调用方决定「解成拥有型还是借用」，也不在
   `Vec::decode` 里猜元素个数（§19.15.14）。要动那条 benchmark 数字只能换被测类型，属
   §19.15.1 的口径问题，不是待办。
+
+- **不为 `NonZero*` 加转换器，`Option<T>` 不做 niche 特化**（§19.19，用户裁定 2026-11-26）：
+  `Option<NonZeroU32>` 恒为 5 / 1 字节，与 `Option<u32>` 同形。4 字节 `0 = None` 是 niche
+  内存布局、不是 wire 契约，要这个形状请用 `#[binary(with)]` 映射到 `u32`。`#[binary(optional)]`
+  也不能与 `NonZero*` 组合（成员缺失时无值可填），只能写 `Option<NonZero*>`。
+- **`PhantomData` 不提供转换器，`#[binary(skip)]` 是唯一写法**（2026-11-26，用户裁定）：
+  类型层标记不携带值，wire 上没有可写的东西；`Vec<PhantomData>` 这类位置的元素个数本身没有
+  意义。derive 也不按类型名自动 skip —— 宏只看得见 token，别名与全路径会让同一字段得到不同
+  格式。与 §3「零元 tuple 整体禁止」同一条口径：没有值的类型不给转换器。
+  `tests/ui/phantom_data.rs` 钉住 E0277（谁加 impl，快照立刻红），`tests/derive.rs` 的
+  `BorrowedView` 钉住「标记 + 一个生命周期参数 + `skip`」可用；只有本 crate 能写这个 impl
+  （orphan rule），所以拒绝靠快照守着，不靠文档承诺。
 
 ### 20.3 剩余（按优先级）
 
