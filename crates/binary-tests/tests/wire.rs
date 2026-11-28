@@ -361,7 +361,10 @@ fn test_trait_prefix_pair_matches_free_functions() {
     // the cursor after the last value.
     let mut e = Allocator::new();
     42i32.encode_with_length_prefix(&mut e).unwrap();
-    "hello".to_string().encode_with_length_prefix(&mut e).unwrap();
+    "hello"
+        .to_string()
+        .encode_with_length_prefix(&mut e)
+        .unwrap();
     let bytes = e.finish().unwrap();
 
     let mut buf: &[u8] = &bytes;
@@ -381,12 +384,21 @@ fn test_compact_int_slice_forms() {
     let mut buf = [0u8; 8];
 
     // Wide header: four bytes written, four read.
-    assert_eq!(binary::converter::encode_slice(&mut buf[..4], 200).unwrap(), 4);
+    assert_eq!(
+        binary::converter::encode_slice(&mut buf[..4], 200).unwrap(),
+        4
+    );
     assert_eq!(&buf[..4], &[0x80, 0x00, 0x00, 200]);
-    assert_eq!(binary::converter::decode_slice(&buf[..4]).unwrap(), (200, 4));
+    assert_eq!(
+        binary::converter::decode_slice(&buf[..4]).unwrap(),
+        (200, 4)
+    );
 
     // Narrow header: one byte each way.
-    assert_eq!(binary::converter::encode_slice(&mut buf[4..], 7).unwrap(), 1);
+    assert_eq!(
+        binary::converter::encode_slice(&mut buf[4..], 7).unwrap(),
+        1
+    );
     assert_eq!(binary::converter::decode_slice(&buf[4..]).unwrap(), (7, 1));
 
     // The cursor form reads the same bytes and advances only on success.
@@ -723,7 +735,10 @@ fn test_compact_int_width() {
 #[test]
 fn test_compact_int_truncated() {
     let mut buf: &[u8] = &[0x80, 0x00, 0x00];
-    assert_eq!(::binary::converter::decode(&mut buf), Err(Error::NotEnoughBytes));
+    assert_eq!(
+        ::binary::converter::decode(&mut buf),
+        Err(Error::NotEnoughBytes)
+    );
 }
 
 // ---- `Layout::LEN` ----
@@ -798,34 +813,31 @@ fn test_oneshot_helpers_round_trip() {
     // the payload (C# `Converter<T>::Encode` / `Decode`, C++ same). Contrast
     // with `encode_auto`, which prefixes variable-length values.
     let v = (1024i32, String::from("csharp"), vec![7i32, 11]);
-    let bytes = binary::encode_value(&v).unwrap();
+    let bytes = binary::encode(&v).unwrap();
     let mut e = Allocator::new();
     v.encode(&mut e).unwrap();
     assert_eq!(bytes, e.finish().unwrap());
 
-    let back: (i32, String, Vec<i32>) = binary::decode_value(&bytes).unwrap();
+    let back: (i32, String, Vec<i32>) = binary::decode(&bytes).unwrap();
     assert_eq!(back, v);
 
     // The raw form is observable: a lone string has no header byte, and a
     // fixed-length container is just its elements back to back.
     assert_eq!(
-        binary::encode_value(&"hello".to_string()).unwrap(),
+        binary::encode(&"hello".to_string()).unwrap(),
         b"hello".to_vec()
     );
+    assert_eq!(binary::decode::<String>(&b"hello"[..]).unwrap(), "hello");
     assert_eq!(
-        binary::decode_value::<String>(&b"hello"[..]).unwrap(),
-        "hello"
-    );
-    assert_eq!(
-        binary::encode_value(&vec![1i32, 2]).unwrap(),
+        binary::encode(&vec![1i32, 2]).unwrap(),
         vec![1, 0, 0, 0, 2, 0, 0, 0]
     );
 
     // Leftover bytes are rejected: a fixed-size value leaves a visible tail.
     // (Variable-length raw decoders consume the whole slice by definition.)
-    let mut extra = binary::encode_value(&42i32).unwrap();
+    let mut extra = binary::encode(&42i32).unwrap();
     extra.push(0);
-    let err = binary::decode_value::<i32>(&extra).unwrap_err();
+    let err = binary::decode::<i32>(&extra).unwrap_err();
     assert!(matches!(err, Error::Message(_)), "{err:?}");
 }
 

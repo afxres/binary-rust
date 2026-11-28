@@ -1,3 +1,3 @@
 fn main() {
-    let _ = binary::encode_value(&());
+    let _ = binary::encode(&());
 }

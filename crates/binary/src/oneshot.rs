@@ -9,11 +9,11 @@
 //!
 //! - **No reuse.** Every call allocates. When that matters, drive [`Allocator`]
 //!   yourself (or `Allocator::on_slice`) — see DESIGN §12.
-//! - **No trailing data.** [`decode_value`] decodes exactly one value and rejects
-//!   leftover bytes; a caller reading one value out of a larger buffer should
-//!   slice the remainder themselves. Variable-length
-//!   raw decoders consume the whole slice by definition, so a tail is only
-//!   observable for fixed-length types.
+//! - **No trailing data for fixed-size types only.** [`decode`] slices exactly
+//!   `LEN` bytes and rejects a leftover tail. A variable-length type is handed
+//!   the whole slice and decides where its own value ends, so a tail after it
+//!   goes unreported; a caller reading one value out of a larger buffer should
+//!   slice the remainder themselves.
 
 use alloc::vec::Vec;
 
@@ -23,20 +23,27 @@ use crate::error::Result;
 
 /// Encode `value` into a new `Vec<u8>` in **raw** position (no length prefix).
 ///
-/// The whole buffer is the payload. [`decode_value`] reads this raw form back.
+/// The whole buffer is the payload. [`decode`] reads this raw form back.
 #[inline]
-pub fn encode_value<T: Encode + ?Sized>(value: &T) -> Result<Vec<u8>> {
+pub fn encode<T: Encode + ?Sized>(value: &T) -> Result<Vec<u8>> {
     let mut a = Allocator::new();
     value.encode(&mut a)?;
     a.finish()
 }
 
-/// Decode one **raw** value from `bytes`, which must be fully consumed.
+/// Decode one **raw** value from `bytes`.
+///
+/// A `LEN > 0` type requires `bytes` to be exactly `LEN` long: a short slice is
+/// [`Error::NotEnoughBytes`], a long one is a trailing-bytes error. A
+/// variable-length type is given the whole slice and decides its own end, so a
+/// tail after it is not reported.
 ///
 /// For a value stored in `auto` position (with a length prefix) use
 /// [`Decode::decode_auto`] instead.
+///
+/// [`Error::NotEnoughBytes`]: crate::Error::NotEnoughBytes
 #[inline]
-pub fn decode_value<'a, T: Decode<'a>>(bytes: &'a [u8]) -> Result<T> {
+pub fn decode<'a, T: Decode<'a>>(bytes: &'a [u8]) -> Result<T> {
     // Fixed-length types get exactly LEN bytes, so a tail after them is
     // observable and rejected. A LEN == 0 raw decoder receives the whole slice
     // and owns the question of what its value spans — most consume everything

@@ -423,7 +423,10 @@ fn test_compact_int_beyond_i32_max_is_rejected() {
     let bytes = e.finish().unwrap();
     assert_eq!(bytes, [0xFF, 0xFF, 0xFF, 0xFF]);
     let mut buf: &[u8] = &bytes;
-    assert_eq!(::binary::converter::decode(&mut buf).unwrap(), i32::MAX as u32);
+    assert_eq!(
+        ::binary::converter::decode(&mut buf).unwrap(),
+        i32::MAX as u32
+    );
 }
 
 #[test]
@@ -432,17 +435,14 @@ fn test_short_value_is_not_enough_bytes() {
     // larger than the buffer compares, never adds, so the slice arithmetic
     // cannot panic — it just reports the short read.
     assert_eq!(
-        binary::decode_value::<u128>(&[1, 2, 3]),
+        binary::decode::<u128>(&[1, 2, 3]),
         Err(Error::NotEnoughBytes)
     );
     assert_eq!(
-        binary::decode_value::<u32>(&[1, 2, 3]),
+        binary::decode::<u32>(&[1, 2, 3]),
         Err(Error::NotEnoughBytes)
     );
-    assert_eq!(
-        binary::decode_value::<[u8; 3]>(&[1, 2, 3]).unwrap(),
-        [1, 2, 3]
-    );
+    assert_eq!(binary::decode::<[u8; 3]>(&[1, 2, 3]).unwrap(), [1, 2, 3]);
 }
 
 #[test]

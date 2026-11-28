@@ -81,13 +81,13 @@ pub trait Decode<'de>: Layout + Sized {
     /// cursor before calling, mirroring C#'s `Decode(in span)` on a converter
     /// with a fixed `Length`; an impl may assume the length and must not read
     /// past it. For `LEN == 0` types the slice is everything the value owns in
-    /// this position: all remaining bytes in raw position ([`decode_value`],
+    /// this position: all remaining bytes in raw position ([`decode`],
     /// tuple tails), the prefix-declared payload in `auto` position.
     ///
     /// A fixed-size impl validates cheaply and reports a short payload as
     /// `NotEnoughBytes`; nothing on a framework path panics.
     ///
-    /// [`decode_value`]: crate::decode_value
+    /// [`decode`]: crate::decode
     fn decode(payload: &'de [u8]) -> Result<Self>;
 
     /// Decode the value in `auto` position: fixed-size types are sliced by

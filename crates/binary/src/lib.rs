@@ -23,7 +23,7 @@ mod smart_ptr;
 pub use allocator::Allocator;
 pub use codec::{Decode, Encode, Layout};
 pub use error::{Error, Result};
-pub use oneshot::{decode_value, encode_value};
+pub use oneshot::{decode, encode};
 
 // Derive macros share the names of the traits (macro namespace vs type
 // namespace), so `use binary::Encode` brings in both.
