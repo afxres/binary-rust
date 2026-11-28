@@ -6,6 +6,19 @@ pub(crate) const SINGLE_BYTE_MAX: usize = 0x7F;
 /// Maximum length expressible in a 4-byte prefix (signed 31-bit).
 pub(crate) const MAX_LENGTH: usize = i32::MAX as usize;
 
+/// Guards a fixed-size total against the 31-bit prefix field.
+///
+/// Called from the `const` sums (`array_len`, `tuple_len`, derive tuple
+/// objects), which is the only place a type's length can be rejected before a
+/// value exists — C# and C++ check the same ceiling in `GetConverterLength`
+/// while building the converter. A panic here aborts const evaluation, so the
+/// offending type fails to compile instead of failing on its first prefixed
+/// write.
+pub(crate) const fn assert_fixed_len(len: usize) -> usize {
+    assert!(len <= MAX_LENGTH, "fixed-size length exceeds i32::MAX");
+    len
+}
+
 /// Returns the number of bytes needed to encode `len` as a length prefix.
 ///
 /// - `len <= 127` → 1 byte

@@ -1221,7 +1221,8 @@ fn gen_layout_named(info: &Info) -> String {
 /// summed, and a single variable-length member yields 0.
 ///
 /// `#[binary(with)]` members contribute their converter's `Repr` length — the
-/// field type need not implement `Layout` at all.
+/// field type need not implement `Layout` at all. The sum is held to the same
+/// 31-bit ceiling as the hand-written tuples and arrays.
 fn gen_layout_tuple(info: &Info) -> String {
     let mut out = format!(
         "{} ::binary::Layout for {} {{\n",
@@ -1235,13 +1236,19 @@ fn gen_layout_tuple(info: &Info) -> String {
         out.push_str(&format!(
             "        match <{} as ::binary::Layout>::LEN {{\n\
              \x20           0 => __all_fixed = false,\n\
-             \x20           __n => __sum += __n,\n\
+             \x20           __n => __sum = __sum.saturating_add(__n),\n\
              \x20       }}\n",
             f.wire_ty()
         ));
     }
     // No `__sum > 0` guard needed: 0 already *is* the variable-length marker,
     // so an all-zero-sized tuple falls out as variable without a second test.
+    out.push_str(
+        "        assert!(\n\
+         \x20           !__all_fixed || __sum <= i32::MAX as usize,\n\
+         \x20           \"fixed-size length exceeds i32::MAX\",\n\
+         \x20       );\n",
+    );
     out.push_str("        if __all_fixed { __sum } else { 0 }\n");
     out.push_str("    };\n}\n");
     out

@@ -185,18 +185,23 @@ impl<T: Layout, const N: usize> Layout for [T; N] {
 /// A zero-length array does have a fixed 0-byte size, but "fixed at zero bytes"
 /// is indistinguishable from "variable" in this encoding, and treating it as
 /// fixed would make it encode to nothing at all.
+///
+/// The sum saturates and is held to the prefix ceiling, so an oversized array
+/// fails where its `LEN` is first evaluated rather than on the first prefixed
+/// write. Only a fixed-size result is constrained: a variable one never puts
+/// its total in a prefix.
 const fn array_len<T: Layout, const N: usize>() -> usize {
-    let mut result = 0;
+    let mut result = 0usize;
     let mut i = 0;
     while i < N {
         let elem = T::LEN;
         if elem == 0 {
             return 0;
         }
-        result += elem;
+        result = result.saturating_add(elem);
         i += 1;
     }
-    result
+    crate::length::assert_fixed_len(result)
 }
 
 impl<T: Encode, const N: usize> Encode for [T; N] {
@@ -271,17 +276,25 @@ impl<'de, T: Decode<'de>, const N: usize> Decode<'de> for [T; N] {
 ///
 /// A loop over the lengths rather than a `match (A::LEN, B::LEN, ...)` pattern:
 /// the hand-written version needed 2^N arms to express "any member is zero".
+/// A fixed-size sum is held to the prefix ceiling, mirroring
+/// `GetConverterLength` in the reference implementations; a variable-length
+/// tuple is not, since its total never reaches a prefix.
 const fn tuple_len(lens: &[usize]) -> usize {
     let mut sum = 0usize;
+    let mut all_fixed = true;
     let mut i = 0;
     while i < lens.len() {
         match lens[i] {
-            0 => return 0,
-            n => sum += n,
+            0 => all_fixed = false,
+            n => sum = sum.saturating_add(n),
         }
         i += 1;
     }
-    sum
+    if all_fixed {
+        crate::length::assert_fixed_len(sum)
+    } else {
+        0
+    }
 }
 
 /// `encode` body: every member but the last through `auto`, the last raw.

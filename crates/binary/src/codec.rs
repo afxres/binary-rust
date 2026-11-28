@@ -13,6 +13,14 @@ pub trait Layout {
     /// guard against and `[T; 0]` degrades to `0` on its own. Zero-sized types
     /// such as `()` are variable-length for the same reason: a container cannot
     /// recover an element count from zero bytes. See `DESIGN.md` §5.
+    ///
+    /// A non-zero value must not exceed `i32::MAX` — every length prefix holds
+    /// a signed 31-bit field. The tuple, array and derive sums enforce that
+    /// ceiling at compile time; a hand-written impl is on its own, and an
+    /// oversized value surfaces as [`Error::LengthTooLarge`] at the first
+    /// prefixed write instead.
+    ///
+    /// [`Error::LengthTooLarge`]: crate::Error::LengthTooLarge
     const LEN: usize = 0;
 }
 

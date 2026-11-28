@@ -272,6 +272,7 @@ Rust 用 trait 关联常量表达，并且**照抄同一个哨兵**：
 |粒度|类型级（构造时传入的 `readonly int`）|类型级 `const`|
 |变长|`0`|`0`|
 |定长|`n > 0`|`n > 0`|
+|上限|`GetConverterLength` 求和时拒绝 `> INT32_MAX`|求和处编译期拒绝（`assert_fixed_len`）|
 |单位|raw payload 字节数，**不含前缀**|同左|
 
 用裸 `usize` 而不是 `Option<usize>`（`None` = 变长），后者会把判别式显式化，
@@ -292,6 +293,19 @@ Rust 用 trait 关联常量表达，并且**照抄同一个哨兵**：
 （`array_len::<T, N>()`、`match (A::LEN, B::LEN)`），
 C++ 的 `GetConverterLength` 是运行时循环。分类抽到独立的 `Layout` trait，
 让 `Encode` 与 `Decode<'de>` 共享同一份判定，不会两边不一致。
+
+上限也在求和处：C# 与 C++ 的 `GetConverterLength` 在构造 converter 时拒绝 `> INT32_MAX`，
+Rust 把同一条放进 `array_len` / `tuple_len` 与 derive 生成的求和里（`assert_fixed_len`）。
+触发即 const 求值失败，报在具体类型的 `LEN` 上，相当于把「构造期」前移到「求值期」。
+只约束定长结果：任一成员为 `0` 时总和根本进不了前缀，不做检查（`(PastMax, String)::LEN`
+仍是 `0`）。手写 `impl Layout` 的单成员长度绕得过这条——关联常量没法全局校验——那种类型
+在第一个带前缀的位置报 `LengthTooLarge`；两侧分别由
+`test_fixed_length_ceiling_holds_at_the_boundary` 与
+`test_oversized_single_member_is_rejected_at_the_first_prefix` 钉住。
+不加 compile-fail fixture：`LEN` 在 codegen 才求值，trybuild 只跑 `cargo check`，
+快照看不到这条 panic；手写 tuple 那条即便 `cargo build` 也会把 note 指到
+`container.rs` / `length.rs` 的行号，随无关改动漂移。`cargo check` 因此看不到超限，
+`cargo build` / `cargo test` 才会拦下。
 
 ### 零字节类型归为变长；零元 tuple 整体禁止
 
@@ -3813,9 +3827,9 @@ C++ 侧的 `--exclude '*-tests/*'`：算进来等于把测试与 harness 代码�
 
 覆盖率缺口分三类，都不是「少写测试」：`array_len` / `tuple_len` 是 `const fn`，编译期求值，
 运行期命中数恒为 0；标量 bulk 的 `else` 分支只在**大端**目标上编译出来（x86_64 上 `cfg!` 走另一支，
-s390x 跑起来才命中，但不进 host 口径）；其余是错误分支与不可达分支。`Allocator` 的
-`LengthTooLarge` 要 >2 GiB 的负载才能命中。derive 剩余部分基本都是诊断路径，每条要一个
-compile-fail fixture，收益低于维护快照的成本。
+s390x 跑起来才命中，但不进 host 口径）；其余是错误分支与不可达分支。`Allocator` 的 anchor
+路径要 >2 GiB 的负载才能命中；bounded 路径与超大 `LEN` 的单成员类型零字节就命中，已有用例。
+derive 剩余部分基本都是诊断路径，每条要一个 compile-fail fixture，收益低于维护快照的成本。
 
 已经钉住的边界包括：`usize` / `isize` 的 native 宽度、`&[u8]` 的 raw 形式、`[String; N]` 的
 变长头、数组解码中途失败时的 drop、`Option` 的未知 tag、borrowed `Allocator` 的 `finish` 失败与

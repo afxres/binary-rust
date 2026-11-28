@@ -405,6 +405,88 @@ fn test_length_beyond_i32_max_is_reported_before_writing() {
     assert_eq!(e.len(), 0, "the guard runs before anything is written");
 }
 
+/// Claims 512 MiB per value and writes nothing, so the payload can never be the
+/// reason a test passes. Three of them fit the 31-bit field, four do not.
+struct HalfGig;
+
+impl Layout for HalfGig {
+    const LEN: usize = 0x2000_0000;
+}
+
+impl Encode for HalfGig {
+    fn encode(&self, _e: &mut Allocator<'_>) -> binary::Result<()> {
+        unreachable!("the length guard must run before the payload")
+    }
+}
+
+impl<'de> Decode<'de> for HalfGig {
+    fn decode(_payload: &'de [u8]) -> binary::Result<Self> {
+        unreachable!("the length guard must run before the payload")
+    }
+}
+
+/// One byte past what a 4-byte prefix can describe, as a single member: no sum
+/// is formed, so the compile-time ceiling cannot see it.
+struct PastMax;
+
+impl Layout for PastMax {
+    const LEN: usize = i32::MAX as usize + 1;
+}
+
+impl Encode for PastMax {
+    fn encode(&self, _e: &mut Allocator<'_>) -> binary::Result<()> {
+        unreachable!("the length guard must run before the payload")
+    }
+}
+
+impl<'de> Decode<'de> for PastMax {
+    fn decode(_payload: &'de [u8]) -> binary::Result<Self> {
+        unreachable!("the length guard must run before the payload")
+    }
+}
+
+/// Exactly the largest fixed size a 4-byte prefix can describe.
+struct AtMax;
+
+impl Layout for AtMax {
+    const LEN: usize = i32::MAX as usize;
+}
+
+#[test]
+fn test_fixed_length_ceiling_holds_at_the_boundary() {
+    // The ceiling itself is a legal fixed size; only the type sums are checked,
+    // and `i32::MAX` is the last value a 31-bit prefix can carry.
+    assert_eq!(<(AtMax,)>::LEN, i32::MAX as usize);
+    assert_eq!(<(HalfGig, HalfGig, HalfGig) as Layout>::LEN, 0x6000_0000);
+    assert_eq!(<[HalfGig; 3] as Layout>::LEN, 0x6000_0000);
+}
+
+#[test]
+fn test_variable_length_tuple_is_not_subject_to_the_ceiling() {
+    // A variable-length member makes the total irrelevant: `0` is what reaches
+    // a prefix, so an oversized fixed member does not reject the tuple.
+    assert_eq!(<(PastMax, String) as Layout>::LEN, 0);
+}
+
+#[test]
+fn test_oversized_single_member_is_rejected_at_the_first_prefix() {
+    // No sum, so nothing to check at compile time — the runtime guard still
+    // runs before a byte is written.
+    assert_eq!(PastMax::LEN, i32::MAX as usize + 1);
+
+    let mut e = Allocator::new();
+    let err = PastMax.encode_with_length_prefix(&mut e).unwrap_err();
+    assert_eq!(err, Error::LengthTooLarge);
+    assert_eq!(e.len(), 0, "the guard runs before the payload");
+
+    let mut e = Allocator::new();
+    let err = vec![PastMax, PastMax]
+        .encode_with_length_prefix(&mut e)
+        .unwrap_err();
+    assert_eq!(err, Error::LengthTooLarge);
+    assert_eq!(e.len(), 0, "the element count times LEN is checked first");
+}
+
 #[test]
 fn test_compact_int_beyond_i32_max_is_rejected() {
     // Same 31-bit field as a length prefix. For `v > i32::MAX`, `v | 0x8000_0000`
