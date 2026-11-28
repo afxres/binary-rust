@@ -111,10 +111,10 @@ C#/C++ 的做法一致，也是三边能互解的前提。
 ### 三条路径
 
 `auto` 的本质是「只读写必要的数据」：定长类型直接 raw，变长类型需要边界。但**边界由谁提供**分两种：
-普通类型由 `encode_with_prefix` 给整个值加一个前缀；**tuple 由成员各自提供边界**
+普通类型由 `encode_with_length_prefix` 给整个值加一个前缀；**tuple 由成员各自提供边界**
 （`encode_auto` 把每个成员都 auto，自身不加前缀）。后者是 §11 平铺语义的关键。
 
-`encode_with_prefix` 是 named 与一般变长值的前缀写入点，默认实现按 `LEN` 分流：
+`encode_with_length_prefix` 是 named 与一般变长值的前缀写入点，默认实现按 `LEN` 分流：
 
 |条件|路径|长度来源|对应 C#|
 |:---|:---|:---|:---|
@@ -210,7 +210,7 @@ pub trait Encode: Layout {
     fn encode(&self, e: &mut Allocator<'_>) -> Result<()>;
 
     /// 无条件写 prefix + payload；默认按 LEN 分流，可被 O(1) 长度的类型覆盖
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match Self::LEN {
             0 => e.append_with_length_prefix(|e| self.encode(e)),
             n => e.append_with_length_prefix_bounded(n, |e| self.encode(e)),
@@ -232,6 +232,9 @@ pub trait Decode<'de>: Layout + Sized {
     /// auto 位置：定长切出 LEN 字节，变长先读前缀再切；tuple / Option 覆盖
     fn decode_auto(buf: &mut &'de [u8]) -> Result<Self> { /* 按 LEN 分流 */ }
 
+    /// 无条件读 prefix + payload，`encode_with_length_prefix` 的读半边；定长也消费前缀
+    fn decode_with_length_prefix(buf: &mut &'de [u8]) -> Result<Self> { /* 前缀 + decode */ }
+
     /// 内部钩子（`#[doc(hidden)]`）：与 `encode_bulk` 对称，默认逐元素 `decode`（§19.16）
     fn decode_bulk(payload: &'de [u8], count: usize) -> Result<Vec<Self>>;
 }
@@ -244,8 +247,13 @@ pub trait Decode<'de>: Layout + Sized {
 |`Length()`（0 = 变长）|`Layout::LEN`（0 = 变长），编译期常量|
 |`Encode`|`Encode::encode`|
 |`EncodeAuto`|`Encode::encode_auto`（有默认实现，**tuple 必须 override**）|
-|`EncodeWithLengthPrefix`|`Encode::encode_with_prefix`（可 override）|
-|`Decode` / `DecodeAuto` / `DecodeWithLengthPrefix`|`Decode::decode` / `Decode::decode_auto` / `decode_with_length_prefix`|
+|`EncodeWithLengthPrefix`|`Encode::encode_with_length_prefix`（可 override）|
+|`Decode`|`Decode::decode`|
+|`DecodeAuto`|`Decode::decode_auto`（有默认实现，**tuple / `Option` 必须 override**）|
+|`DecodeWithLengthPrefix`|`Decode::decode_with_length_prefix`|
+
+三写三读两边都齐：C++ 靠 CRTP 助手把缺省的几个补到 `Converter<T>` 上，Rust 靠 trait 默认方法
+补到 `Encode` / `Decode` 上，调用点因此是同名的（`v.encode_auto(e)`），不需要写助手全名。
 
 `EncodeAuto` 在绝大多数类型上不需要单独实现（默认按 `LEN` 分流），
 但 **tuple 必须 override**：C# `ContextMethodsOfTupleObject::GetEncodeDelegateAsTupleObject`
@@ -278,7 +286,7 @@ Rust 用 trait 关联常量表达，并且**照抄同一个哨兵**：
 
 代价是 `LEN = 0` 不像 `FIXED = None` 那样自解释，所以常量名从 `FIXED` 改成 `LEN`
 （对齐 C# `Length` / C++ `Length()`），文档注释写明 `0` 的含义。分类只由 `LEN` 决定，
-`encode_with_prefix` 走精确路径还是 anchor 是另一件事，两者不要混。
+`encode_with_length_prefix` 走精确路径还是 anchor 是另一件事，两者不要混。
 
 `LEN` 是关联 `const` 而不是运行时字段：编译期可组合
 （`array_len::<T, N>()`、`match (A::LEN, B::LEN)`），
@@ -288,7 +296,7 @@ C++ 的 `GetConverterLength` 是运行时循环。分类抽到独立的 `Layout`
 ### 零字节类型归为变长；零元 tuple 整体禁止
 
 不存在「定长 0 字节」这种分类：零长序列（`[T; 0]`）按 `LEN = 0` 即变长处理，
-让默认 `encode_with_prefix` 走 anchor，写出一个 `0x00` 零长度前缀；容器因此能按
+让默认 `encode_with_length_prefix` 走 anchor，写出一个 `0x00` 零长度前缀；容器因此能按
 前缀推进、恢复元素个数。回归测试：`test_zero_length_array_is_variable`。
 
 但**零元 tuple 不参与转换**，口径与 C# 一致：参考实现不把零元 tuple 当可转换
@@ -314,17 +322,17 @@ type`），source generator 报 `BINSRCGEN13`「Type Not Recognized」诊断。R
 
 ### 前缀归属（编码时必须钉死的边界）
 
-**前缀由 `encode_auto` / `encode_with_prefix` 决定，`encode` 和 `decode` 都只处理 raw payload。**
+**前缀由 `encode_auto` / `encode_with_length_prefix` 决定，`encode` 和 `decode` 都只处理 raw payload。**
 
 |层|写入 / 读取内容|
 |:---|:---|
 |`Encode::encode_auto`|定长 raw；一般变长 `prefix + raw`；**tuple 平铺、无自身前缀**|
-|`Encode::encode_with_prefix`|`prefix + encode(raw)`，**无条件前缀**|
+|`Encode::encode_with_length_prefix`|`prefix + encode(raw)`，**无条件前缀**|
 |`Encode::encode`|**仅 raw payload**，绝不写前缀|
 |`Decode::decode_auto`|`encode_auto` 的解码对称面；tuple 覆盖为逐成员 `decode_auto`|
 |`Decode::decode`|**仅 raw payload**，绝不读前缀|
 
-`encode_named_member(e, name, value)` 直接调 `value.encode_with_prefix(e)` —— named object 的
+`encode_named_member(e, name, value)` 直接调 `value.encode_with_length_prefix(e)` —— named object 的
 成员 value 无条件带前缀（对应 C# `EncodeWithLengthPrefix`），所以**不会**误用 tuple 的
 平铺 override。因为 `encode_auto` 是统一入口，tuple 的 override 在嵌套每一层自动生效，
 容器无需配合。
@@ -443,6 +451,26 @@ enum Inner<'a> {
 
 `take` / `take_byte` 是 `pub(crate)`：定长类型 `decode` 的机制，不是给调用方的工具。
 
+### 模块归属与根出口
+
+这组函数在 `pub mod converter` 里，**不在 crate 根重复导出**。三边的入口因此是同一套「模块.
+函数」的写法：
+
+|角色|C#|C++|Rust|
+|:---|:---|:---|:---|
+|一次性写值（返回缓冲）|`generator.Encode(item)`|`Converter<T>::Encode` + `Allocator::Invoke`|`binary::encode(&value)`|
+|一次性读值|`generator.Decode<T>(buffer)`|`Converter<T>::Decode(span)`|`binary::decode::<T>(&bytes)`|
+|紧凑整数 / 前缀原语|`Converter.Encode` / `Decode`|`binary::Encode` / `Decode`|`binary::converter::encode` / `decode`|
+
+C# 用两个类型（`Generator` 与 `Converter`）隔开两组同名方法，Rust 没有 `Generator` 这个类型，
+crate 根就站在它的位置上，另一组靠模块名限定。这就是 `binary::encode`（整个值）与
+`binary::converter::encode`（一个紧凑整数）同名而不混淆的全部理由 —— 不是「Rust 不能重载」
+这种机制描述，而是「根 = Generator、converter = Converter」这套类型对位。
+
+根上不重复导出这 6 个函数：两条路径同时存在，限定就白做了，而 `binary::encode` 会被读成
+「一次性写值」。代价是既有调用点全部要加 `converter::`，`Encode` / `Decode` 的默认实现与
+derive 生成代码也一并改（`crates/binary-derive` 生成 `::binary::converter::encode`）。
+
 ## 5. derive 宏
 
 ```rust
@@ -560,7 +588,7 @@ tuple struct / unit struct / 泛型结构体 / 泛型枚举 / 空结构体 / 空
 ...
 ```
 
-关键：**name 和 value 都无条件带前缀**，用 `encode_with_prefix` 而不是 `auto`。
+关键：**name 和 value 都无条件带前缀**，用 `encode_with_length_prefix` 而不是 `auto`。
 C# `ContextMethodsOfNamedObject` 调的是 `EncodeWithLengthPrefix`，
 C++ `NamedObjectConverter::EncodeInternal` 也是 `EncodeWithLengthPrefix`；
 即使 value 是 `i32` 这种定长类型也照样带前缀（与 tuple 的 `encode_auto` 平铺行为不同）。
@@ -595,12 +623,12 @@ C++ `NamedObjectConverter::EncodeInternal` 也是 `EncodeWithLengthPrefix`；
 |API|作用|
 |:---|:---|
 |`Encode::encode_auto` / `Decode::decode_auto`|位置派发的唯一入口：定长 raw、变长 `prefix + raw`、tuple 平铺；派生代码用限定路径调用|
-|`encode_named_member(e, name, value)`|写一个成员，直接调 `value.encode_with_prefix(e)`，**无条件前缀**；成员写入的**唯一**公开入口|
+|`encode_named_member(e, name, value)`|写一个成员，直接调 `value.encode_with_length_prefix(e)`，**无条件前缀**；成员写入的**唯一**公开入口|
 |`decode_named_member(d)`|读一个成员，返回 `(name, raw payload)`；值前缀在这里消费掉，`encode_named_member` 的读侧对偶|
 |`NamedMembers::<N>::parse(d, find)`|循环 `decode_named_member(d)`；未知跳过、重名报错、按索引记录 value 的 raw slice|
 |`NamedMembers::value(i, name)` / `value_or_default(i)`|按索引 raw decode；缺失分别报 `missing required member: {name}` / 取 `Default`|
 
-成员读写是 `named.rs` 的两个自由函数，不在 `Allocator` 上（读侧没有可以挂的类型）：成员不是游标操作，
+成员读写是 `components.rs` 的两个自由函数，不在 `Allocator` 上（读侧没有可以挂的类型）：成员不是游标操作，
 挂上去像是在给 `named object` 开特权（`Vec`、tuple 都没有对应方法）。名字也直说 `member`，
 不会被读成「读写整个对象」；半操作随之消失 —— 名字与值在同一个函数里连写，
 「有名字没值」表达不出来。
@@ -610,20 +638,21 @@ C++ `NamedObjectConverter::EncodeInternal` 也是 `EncodeWithLengthPrefix`；
 （成员顺序不是 wire 契约），这份缓冲就是 `NamedMembers`。非对称因此只留在对象层，
 成员层由 `encode_named_member` / `decode_named_member` 这一对抹平。
 
-`NamedMembers` 是表中唯一**必须**留在 crate 根 `pub` 的类型，不是为测试便利导出：
-`#[derive(Decode)]` 展开在调用方 crate，生成代码直接引用
-`::binary::NamedMembers::<N>::parse(__d, ...)`；把重导出降成 `pub(crate)` 会让所有
-named struct 的派生解码报 E0603（实测另有三处手写调用同样失败）。同时它也是
+`NamedMembers` 必须 `pub` 且能被展开后的代码按绝对路径引用：它是表中唯一**必须**在 crate 外
+可见的类型，不是为测试便利导出 —— `#[derive(Decode)]` 展开在调用方 crate，生成代码直接引用
+`::binary::components::NamedMembers::<N>::parse(__d, ...)`；降成 `pub(crate)` 会让所有
+named struct 的派生解码报 E0603（实测另有三处手写调用同样失败）。它也是
 **不用 derive、手写 `Decode`** 时唯一的 named 解码入口 —— `decode_named_member` 只把一对前缀
 读成 `(name, payload)`，跳过未知名、查重、按索引保存 raw payload 这套语义仍只在这里。
+放在 `components` 而不是 crate 根，是因为它和那两个自由函数是同一份协议：`parse` 逐成员调
+`decode_named_member`，把缓冲和读半边的函数拆到两个模块没有好处，也不对应 C++ 的
+`binary::components` 命名空间。
 方法层面按「谁在 crate 外用」划线：`parse` / `value` / `value_or_default` 是 derive 生成
 代码直接调用的契约（建表 + 两个按 slot 取值的入口）；`get` 返回原始 payload，derive 的
 `optional + with` 组合用它把字节交给成员转换器，「未知名字被跳过」那条测试也靠它观察结果；
 `require` 只被同 impl 的 `value` 调用，是 `pub(crate)`。
-若只想收窄文档可见面，可给重导出加
-`#[doc(hidden)]`，但 semver 承诺不变。
 
-半操作不存在了：`encode_named_member` 里 `append_prefixed_bytes(name)` 与 `encode_with_prefix`
+半操作不存在了：`encode_named_member` 里 `append_prefixed_bytes(name)` 与 `encode_with_length_prefix`
 连着写，没有「只写名字」的公开或私有入口。生成代码目前不预计算名字头；若将来实测值得，
 再加 `encode_named_member_precomputed(&'static [u8], &T)`，而不是拆出半操作。
 
@@ -637,12 +666,12 @@ decode→encode 幂等与 anchor 兜底。
 ### 为什么成员读写是自由函数
 
 把成员写入做成 `impl Allocator { fn named(..) }` 是可行的，论证的是「**可行**」：模块边界不是层
-边界，固有 `impl` 写在 `named.rs` 与写在 `allocator.rs` 调用点完全一致（std 就把 `impl File`
+边界，固有 `impl` 写在 `components.rs` 与写在 `allocator.rs` 调用点完全一致（std 就把 `impl File`
 放在平台模块里）。但「可以」不等于「应该」—— 名字 `named` 读起来像「读写整个 named 对象」，
 实际只写**一个成员**；把它挂在 `Allocator` 上，等于让字节游标认识一种对象形状，而 `Vec`、
 tuple 都没有这种待遇。
 
-所以归属和名字一起改：`encode_named_member` / `decode_named_member` 是 `named.rs` 里的自由
+所以归属和名字一起改：`encode_named_member` / `decode_named_member` 是 `components.rs` 里的自由
 函数，`Allocator` 退回纯字节容器，读侧只剩切片。
 
 |方案|买到|付掉|
@@ -650,7 +679,7 @@ tuple 都没有这种待遇。
 |`NamedObject<'_>` 状态 writer（serde `SerializeStruct` 风格）|强制「每个 name 跟一个 value」|对象边界是**外层长度前缀**，writer 本身没有状态、`finish()` 是空的；每个派生 `encode` 多一个 binding 加一个生命周期|
 |扩展 trait `NamedExt`|`Allocator` 的表面只剩字节操作|手写 impl 多一个 `use`，生成代码走 UFCS —— 为观感付接口税|
 |固有方法 `Allocator::named`（已否决）|调用点最短|名字误导成「整个对象」；`Allocator` 与 `Encode` 耦合；`write_name` 这个半操作被迫活在一个 `impl` 里|
-|自由函数（现状）|协议与游标分离、名字直说 `member`、半操作消失、与 C++ `::binary::EncodeWithLengthPrefix` 同形|两个 crate 根名字；调用点从 `e.named(..)` 变成 `encode_named_member(&mut e, ..)`|
+|自由函数（现状）|协议与游标分离、名字直说 `member`、半操作消失、与 C++ `::binary::EncodeWithLengthPrefix` 同形|同模块两个名字；调用点从 `e.named(..)` 变成 `components::encode_named_member(&mut e, ..)`|
 
 **半操作随固有 `impl` 一起消失了**：自由函数里两行连着写，不再需要一个「只写名字」的私有
 方法，「有名字没值」这种非法状态连半条路径都没有。
@@ -875,26 +904,26 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 |模块|职责|
 |:---|:---|
 |`lib.rs`|`no_std` 入口（`extern crate alloc`）、模块声明与 re-export；feature 只有 `std` 与 `derive`（§17.5）|
-|`codec.rs`|三个 trait：`Layout` / `Encode`（`encode` + `encode_with_prefix` + `encode_auto` + `encode_bulk` 内部钩子）/ `Decode<'de>`（`decode` + `decode_auto` + `decode_bulk`）|
+|`codec.rs`|三个 trait：`Layout` / `Encode`（`encode` + `encode_with_length_prefix` + `encode_auto` + `encode_bulk` 内部钩子）/ `Decode<'de>`（`decode` + `decode_auto` + `decode_with_length_prefix` + `decode_bulk`）|
 |`length.rs`|前缀编解码 `encode_prefix` / `encode_prefix_wide` / `decode_prefix` / `prefix_header_len`，全部 `pub(crate)`（§4.3）；全部 `Result` 化，无静默截断（§18）|
 |`allocator.rs`|`Allocator<'a>`、`append_with_length_prefix_bounded`、`append_with_length_prefix`（16 阈值）、`PREFIX_SHRINK_LIMIT`（`pub(crate)`，不导出，§12.4）、`append_prefixed_bytes`（`pub(crate)`，长度已知时一次预留）|
-|`converter.rs`|自由函数 `encode` / `decode`（紧凑整数，§16）及 slice 形态 `encode_slice` / `decode_slice`、`encode_with_length_prefix` / `decode_with_length_prefix`；`pub(crate)` 的 `take` / `take_byte`（§4.3）|
+|`converter.rs`|`pub mod`，对位 C# `Converter` 静态类：自由函数 `encode` / `decode`（紧凑整数，§16）及 slice 形态 `encode_slice` / `decode_slice`、`encode_with_length_prefix` / `decode_with_length_prefix`；`pub(crate)` 的 `take` / `take_byte`（§4.3）|
 |`primitives.rs`|`u8`–`u128` / `i8`–`i128` / `f32` / `f64` / `bool`（读宽容 `b != 0`）/ `char`（4 字节）/ `usize` / `isize`|
-|`container.rs`|`String` / `str` / `Vec<T>` / `&[u8]` / `[T; N]`；整段 payload 委托 `T::encode_bulk` / `T::decode_bulk`（§6 第 2 条、§19.16）；O(1) `encode_with_prefix`；`Tuple` 1–12 由 `macro_rules!` 平铺（§11）|
+|`container.rs`|`String` / `str` / `Vec<T>` / `&[u8]` / `[T; N]`；整段 payload 委托 `T::encode_bulk` / `T::decode_bulk`（§6 第 2 条、§19.16）；O(1) `encode_with_length_prefix`；`Tuple` 1–12 由 `macro_rules!` 平铺（§11）|
 |`option.rs`|`Option<T>` = tag + value，auto 位置**无前缀**（§12.6）|
 |`smart_ptr.rs`|`Box` / `Rc` / `Arc`：wire 透明，解码不保留共享身份（§19.13）|
 |`collections.rs`|`VecDeque` / `LinkedList` / `BinaryHeap` / `BTreeMap` / `BTreeSet` / `Cow`（`alloc`，无条件）+ `HashMap` / `HashSet`（`std`，hasher 泛型）；raw payload = `Vec<T>`，委托 `Vec::decode`（§19.14）|
-|`named.rs`|`encode_named_member` / `decode_named_member` / `NamedMembers<N>`；成员无条件带前缀（§5）|
+|`components.rs`|`pub mod`，对位 C++ `binary::components`：`encode_named_member` / `decode_named_member` / `NamedMembers<N>`；成员无条件带前缀（§5）|
 |`pod.rs`|私有 `write_bulk` / `read_bulk`：全 crate 唯一两处把 `&[T]` 当 `&[u8]` 重解释（§19.16）|
 |`error.rs`|闭合 `Error`（5 变体：`BufferFull` / `NotEnoughBytes` / `LengthTooLarge` / `Message(Cow)` / `Wrapped(Arc<dyn Error>)`）；静态消息零分配；降级规则见 §18|
 |`hex.rs`|`Debug` 用的 32 字节 hex 预览（私有）|
-|`oneshot.rs`|`encode_value` / `decode_value`：raw 位置的入口，每次分配、不复用缓冲、不接受尾随字节（§4）|
+|`oneshot.rs`|`encode` / `decode`（根出口）：raw 位置的入口，每次分配、不复用缓冲；`encode` 之后整段就是载荷，`decode` 对定长类型拒绝尾随字节（§4）|
 
 ### 9.2 `binary-derive`
 
 |能力|写法|实现要点|
 |:---|:---|:---|
-|named object|默认（无属性）|`rename` / `optional` / `skip`；成员一律走 `encode_with_prefix`，定长 value 也带前缀。容器级 `rename_all` 未实现（§5）|
+|named object|默认（无属性）|`rename` / `optional` / `skip`；成员一律走 `encode_with_length_prefix`，定长 value 也带前缀。容器级 `rename_all` 未实现（§5）|
 |tuple object|`#[binary(tuple)]`|字段按声明序平铺，auto 位置无自身前缀（§11）|
 |C 类枚举|`#[binary(int)]`|判别值按 C# 的整数语义写（§14）；`#[repr(...)]` 是编译错误，tag 永远紧凑整数（§16）|
 |标记联合|`#[binary(union)]`|tag 为紧凑整数，payload 按 tuple object 规则（§16）|
@@ -945,17 +974,17 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
   都是 `EncodeAuto` / `DecodeAuto`。定长元素 `auto` 折叠成 raw，无额外前缀。
 - `Option<T>` = `tag + value`，**`encode_auto` / `decode_auto` 不加前缀**，与
   `NullableConverter` 的 override 一致（§12.6）。前缀只在框架要求时出现
-  （named 成员），由默认 `encode_with_prefix` 提供。
+  （named 成员），由默认 `encode_with_length_prefix` 提供。
 - 同一个理由适用于 union：C# `UnionConverter` override 了 `EncodeAuto`，
   否则会落到基类 `Converter<T>::EncodeWithLengthPrefixVariable` 的 anchor 路径而多一个前缀。
   派生代码因此 override `encode_auto` / `decode_auto`（§16）。
-- **named object 的成员是例外：用 `encode_with_prefix`（无条件前缀），不是 `auto`**。
+- **named object 的成员是例外：用 `encode_with_length_prefix`（无条件前缀），不是 `auto`**。
   C# `ContextMethodsOfNamedObject` 与 C++ `NamedObjectConverter` 都用
   `EncodeWithLengthPrefix`，定长 value 也带前缀。详见 §5。
 - **派生宏生成的 wire 与手写实现一致**（`test_derive_wire_matches_handwritten_layout`），
   外层前缀宽度已按 §12.4 改成 16 阈值，与 C#/C++ 逐字节相等。
 - **长度预测不暴露、不递归**（§10）：`String` / `[u8]` / 定长元素集合 override
-  `encode_with_prefix` 用 O(1) 精确长度；组合类型走默认 anchor，`auto_len` / `named_len` 已删除。
+  `encode_with_length_prefix` 用 O(1) 精确长度；组合类型走默认 anchor，`auto_len` / `named_len` 已删除。
 - **tuple 平铺**（§11）：`encode` 最后成员 raw，`encode_auto` / `decode_auto` 全成员 auto
   且不加自身前缀；`((a,b),c)` 与 `(a,b,c)` wire 相同，可跨类型互解。
 
@@ -1005,7 +1034,7 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 |`bool::decode` 的宽容|照抄不是疏忽：真实 C# 探针（`00 → False`，`01` / `02` / `FF → True`）与 C++ 一字节 memcpy 同表现，保留 `b != 0`，文档写明「读宽容、写规范」|
 |`Allocator` 的 `Debug`|手写实现 + `hex.rs` 的 32 字节预览；不用 derive（会把 `Vec` 的保留尾巴倒出来）|
 |缓冲复用|不做：`finish(self)` 吃掉 `Vec` 是刻意的，`on_slice` 是唯一复用出口；`impl Default` 随之删除（§4）|
-|一次性辅助函数|`binary::encode_value(&T)` / `binary::decode_value::<T>(&[u8])`，raw 位置（§4）|
+|一次性辅助函数|`binary::encode(&T)` / `binary::decode::<T>(&[u8])`，raw 位置（§4）|
 |读侧的长度 / 位置查询|一个都不提供：`buf.len()` 就是剩余量，绝对偏移 = `总长 - buf.len()`；`position()` 在嵌套载荷里会被读成绝对值，删掉|
 |`Pod` 空壳|删掉 `pub unsafe trait Pod`（写不出配套 `impl`，E0119），改为元素内部钩子|
 |named 成员的错误位置|不折回：`NamedMembers::value` 拿到的是独立切片，成员内失败只能由成员 impl 自己拼相对距离（`Error::message`）|
@@ -1017,7 +1046,7 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 `Encode` 不暴露长度查询接口：没有 `payload_len()`，也没有 `auto_len()` / `named_len()`。
 框架不递归遍历值树；需要 1 字节头的地方由具体 converter 给出 O(1) 长度（`len()`、`LEN`、
 `len() * LEN`），给不出就走 anchor 兜底。前缀的写入点因此落在 `Allocator` 的原语和 trait 的
-`encode_with_prefix` 默认实现上（§2、§3），不在某个公开的长度接口上。
+`encode_with_length_prefix` 默认实现上（§2、§3），不在某个公开的长度接口上。
 
 ### 10.1 为什么：开销与回报不成比例
 
@@ -1071,12 +1100,12 @@ Rust 比 C# 更有条件做对——`str::len()` 就是 UTF-8 wire 字节数、`
 ### 10.3 谁给长度
 
 `str` / `String` / `[u8]` / `Vec<u8>` 用 `len()`；`Vec<T>` / `[T; N]` 在 `T::LEN = n` 时用
-`len() * n`；其余一律 anchor。派生宏与自定义类型只需实现 `encode`——`encode_with_prefix` 的
+`len() * n`；其余一律 anchor。派生宏与自定义类型只需实现 `encode`——`encode_with_length_prefix` 的
 默认实现就是 anchor 路径，`T::LEN != 0` 的类型则由 `auto` 直接写裸 payload，不产生前缀（§3）。
 
 |类型|路径|长度来源|
 |:---|:---|:---|
-|`String` / `str` / `[u8]` / `Vec<u8>`|override `encode_with_prefix`|`self.len()`，O(1) 精确|
+|`String` / `str` / `[u8]` / `Vec<u8>`|override `encode_with_length_prefix`|`self.len()`，O(1) 精确|
 |`Vec<T>` / `[T; N]`，`T::LEN = n`|override|`len() * n`，O(1) 精确|
 |变长元素集合 / tuple / named object / `Option<T>`|默认 anchor|兜底，**不递归预测**|
 |自定义 / 派生结构体|默认 anchor|兜底|
@@ -1122,12 +1151,12 @@ Decode 侧 `Decode` / `DecodeAuto` 完全对称。
 |:---|:---|
 |`encode`（C# `Encode`）|成员展开；除最后外 auto，最后 raw；**无外层前缀**|
 |`encode_auto`（C# `EncodeAuto`）|成员展开；**所有成员 auto**；**无外层前缀**|
-|`encode_with_prefix`（C# `EncodeWithLengthPrefix`）|**外层前缀** + `encode`（最后 raw）|
+|`encode_with_length_prefix`（C# `EncodeWithLengthPrefix`）|**外层前缀** + `encode`（最后 raw）|
 
 ### 11.3 `encode_auto` / `decode_auto`
 
-`Encode` 只有 `encode` + `encode_with_prefix`，`auto` 入口（`value.encode_auto(e)`，§5）
-对变长类型直接调 `encode_with_prefix`——对一般类型正确，对 tuple 则错：变长子 tuple 会多
+`Encode` 只有 `encode` + `encode_with_length_prefix`，`auto` 入口（`value.encode_auto(e)`，§5）
+对变长类型直接调 `encode_with_length_prefix`——对一般类型正确，对 tuple 则错：变长子 tuple 会多
 一个整体前缀。错误形态：
 
 ```text
@@ -1139,7 +1168,7 @@ flat   (25 bytes): b0 06 ... f4 01 00 00 |     03 61 6d 79 07 00 00 00 | 6c 6f 6
 `Encode` 因此有 `encode_auto`、`Decode` 有 `decode_auto`（都带默认实现），`auto` 入口只调用
 它们；1–12 元 tuple（`macro_rules!` 生成，见 §11.5）override 这两个方法为「所有成员 auto、
 不加自身前缀」，`encode` / `decode` 的 raw 语义不变。`encode_named_member` 仍用
-`encode_with_prefix`，所以 named object 成员不会误用平铺 override。
+`encode_with_length_prefix`，所以 named object 成员不会误用平铺 override。
 
 这也说明「`EncodeAuto` 不需要 trait 方法」只对非 tuple 类型成立：`auto` 的边界由谁提供必须由
 converter 决定，tuple 是必须 override 的例外。
@@ -1479,7 +1508,7 @@ TFM 共用，条件行会破坏「表 == 语料」。`fsharp.tsv` 因此保留�
   `encode` / `decode` 用 raw value。这条 override 是必需的：`Option` 的 `LEN = 0`，走默认
   路径就会套上 anchor 前缀写出 `05 0105000000`，而这个 wire **C# 解不了**（把 `05` 当 tag，
   直接 invalid tag）——不是宽度差异，是真不兼容。
-- named 成员仍带前缀（`05 | 01 05000000`）：那由 `encode_with_prefix` 提供，正是 C#
+- named 成员仍带前缀（`05 | 01 05000000`）：那由 `encode_with_length_prefix` 提供，正是 C#
   `EncodeWithLengthPrefix` 的行为。
 
 回归：`vec_i32opt`、`vec_i32opt_none`、`named_with_opt_none`、`named_with_opt_some`
@@ -1715,7 +1744,7 @@ payload 完全复用 tuple object 规则（§11 / §14.1）：
   `EncodeWithLengthPrefixVariable`＝`Allocator.Anchor` + `Encode` + `FinishAnchor`
   （`Converter<T>::EncodeWithLengthPrefixVariable`），所以**不 override `EncodeAuto` 就会被 anchor 加前缀**；
   C# 这里 override 了，Rust 的派生代码也必须 override `encode_auto`。
-- named 成员位置仍然带前缀，因为那是框架给的：`encode_named_member` 调 `encode_with_prefix`，
+- named 成员位置仍然带前缀，因为那是框架给的：`encode_named_member` 调 `encode_with_length_prefix`，
   默认实现是 anchor over `encode`，与 C# `EncodeWithLengthPrefix` 的 anchor 路径一致。
 
 **三边真实实现实测**。同一组形状，单元格是 `auto / raw`
@@ -1994,7 +2023,7 @@ type id 可比，无关类型打印相同即相等——这是接受下来的后
 这类方法因此不提供：能解释绝对值的人必然持有原始 buffer，一次减法就够；C# / C++ 把 cursor
 放在 span 里，也没有位置方法。
 
-`decode_value` 是例外场景：它拿到独立切片，失败时连「值从哪开始」都没有上下文，错误里只报
+`binary::decode` 是例外场景：它拿到独立切片，失败时连「值从哪开始」都没有上下文，错误里只报
 文本——与 C# `Generator.Decode(byte[])` 的位置信息量相同。
 
 ### 18.6 不加 `#[non_exhaustive]`
@@ -2392,8 +2421,8 @@ impl）+ `lib.rs` 一行 `mod smart_ptr;`，**不改 wire、不改 derive 宏、
 
 **四个必须踩准的点**：
 
-1. `encode` / `encode_with_prefix` / `encode_auto` 三个方法都**显式转发**，不能依赖默认实现：
-   默认 `encode_auto` / `encode_with_prefix` 按 `Self::LEN` 分派，会丢掉 `T` 上的 override
+1. `encode` / `encode_with_length_prefix` / `encode_auto` 三个方法都**显式转发**，不能依赖默认实现：
+   默认 `encode_auto` / `encode_with_length_prefix` 按 `Self::LEN` 分派，会丢掉 `T` 上的 override
    （tuple 与 `#[binary(tuple)]` 的 flatten、`Option<T>`、`String` 的 O(1) 前缀）。
 2. `Layout::LEN = T::LEN`：否则 `Vec<Box<i32>>` 会把元素当变长、逐项 `append_with_length_prefix`，
    与 `Vec<i32>` 字节不一致。
@@ -2622,7 +2651,7 @@ owned `Vec` 两行与 `i32` 基线在 `objects` 里本来就有，删掉重复�
 ||`Allocator` 两次 `append`|34.0|2.12 ns/次|
 ||`append_with_length_prefix_bounded(6, …)`|26.6|1.66 ns/次，**比两次顶层 `append` 还便宜**|
 ||**`append_with_length_prefix`**|**91.8**|**5.74 ns/次，是 precise 路径的 3.4×**|
-||`String::encode_with_prefix`|74.2|4.64 ns/次（堆上 `String`，长度是运行时 load）|
+||`String::encode_with_length_prefix`|74.2|4.64 ns/次（堆上 `String`，长度是运行时 load）|
 |named 成员 ×16|flat 8 B 一次写|2.12|下界|
 ||`encode_named_member(Id, i32)`|21.8|1.36 ns/成员|
 ||`encode_named_member(Name, String)`|183.3|11.46 ns/成员|
@@ -2632,7 +2661,7 @@ owned `Vec` 两行与 `i32` 基线在 `objects` 里本来就有，删掉重复�
 payload 里它被调用 3 次（named 的 auto 外层、`Item`、`Tags`），C++ `Allocator::FinishAnchor`
 也做同样的 wire 动作，但 Rust 用闭包 + 子切片实现更重。其次是每个 named 成员：
 私有半操作 `write_name`（已删除）曾把前缀编进栈上 `[u8; 4]` 再**两次** `append`，
-值又走 `encode_with_prefix` →
+值又走 `encode_with_length_prefix` →
 `append_with_length_prefix_bounded` → 新建一个子 `Allocator`。`encode tuple (owned Vec)` 57.4 ns vs `on_slice`
 25.6 ns（2.2×），差额是 1 次 256 B 分配 + 每次 `Vec::resize` 检查 + `finish()`。
 
@@ -2888,7 +2917,7 @@ C++ `NamedObjectConverter` 同会话是 16.0。三点结论：
 **被否决的两条（留记录，别再试）**
 
 - `String` / `Vec` 用「已知长度的 bounded 前缀」：库里**已经是**这样（`container.rs` 的
-  `encode_with_prefix` 调 `append_with_length_prefix_bounded(self.len(), …)`）。隔离实验里那 7 ns
+  `encode_with_length_prefix` 调 `append_with_length_prefix_bounded(self.len(), …)`）。隔离实验里那 7 ns
   差异在两种构建下方向相反，判为布局噪声。
 - 把扩容分支标 `#[cold] #[inline(never)]`：LTO 下 named 再快 2.5 ns（38.0 → 33.2），但
   owned 路径付 6~7 ns（tuple owned 58.7 → 62.8，默认 70.4 → 74.3），净负。
@@ -2990,13 +3019,13 @@ C++ 侧 `flatten`）。负载 `(i32, String, Vec<i32>, (f64, Vec<String>))` = 50
    +10.8 ns，C++ 只有 +1.5 ns。逐成员看更清楚 —— `String` 前缀 Rust 6.2 vs 两次 `append`
    3.4（贵 2.8），C++ 反过来：`EncodeWithLengthPrefix` 2.31 vs 两次 `Append` 3.37（**一次
    完成比两次 Append 便宜**）。同样的语义，两边符号相反，这就是缺口。
-3. **原因在 API 形状**：`String::encode_with_prefix` 走的是
+3. **原因在 API 形状**：`String::encode_with_length_prefix` 走的是
    `append_with_length_prefix_bounded(len, |e| e.write(bytes))` —— 长度本来精确，bounded 只是借来复用。
    它要 `ensure(h)` → 手动推进 `pos` → `f` 里再 `ensure + memcpy + pos` → 事后回写 header，
    两次容量检查、两次 `as_mut_slice`、两次 `pos` 更新；`append_prefixed_bytes` 只有一次预留、
    一次写头、一次 memcpy。
 
-**改动**：`String` / `str` / `[u8]` / `&str` / `&[u8]` 的 `encode_with_prefix` 改走
+**改动**：`String` / `str` / `[u8]` / `&str` / `&[u8]` 的 `encode_with_length_prefix` 改走
 `append_prefixed_bytes`（`allocator.rs` 里本来只给成员名用，§19.15.9），并把它的 >127 分支拆成
 `#[cold] #[inline(never)]`，1 字节臂只留「ensure + 写头 + memcpy」。`Vec<T>` **不动**：
 M4/M5 说明 POD 容器的 bounded 与手写打平（16 B memcpy 主导），改它没有收益。wire 不变
@@ -3071,7 +3100,7 @@ callee 写判别 + caller 读判别」。实测（同一 50 字节 tuple 体、�
 −3.52~+0.73（噪声覆盖）。结论：24 字节错误通道的价格 ≈ **0.2 ns/call**，与 2 字节结果几乎
 不可分；真正贵的是「过边界」本身，不是错误类型的大小。
 
-**热路径上没有这个边界**：`Allocator::append` / `ensure_capacity` / `encode_with_prefix` 全是
+**热路径上没有这个边界**：`Allocator::append` / `ensure_capacity` / `encode_with_length_prefix` 全是
 `#[inline]`，泛型在调用方单态化，`?` 在成功路径上退化成一个判别比较，LLVM 不会为 `Result<()>`
 开槽。所以 §19.15.11 的 16.1 ns 里没有「错误返回值」这一项，把 `Error` 缩到 16 字节也不会
 更快。反过来算一下量级：tuple encode 有 17 次写入，**假如**每次都落在非内联边界上，

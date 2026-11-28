@@ -34,7 +34,7 @@ containers keep working, and `cargo test -p binary --no-default-features` is par
 ## Basic Usage
 
 ```rust
-use binary::{Decode, Encode, Allocator, decode_value, encode_value};
+use binary::{decode, encode, Allocator, Decode, Encode};
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 struct Person {
@@ -48,15 +48,15 @@ struct Person {
 fn main() {
     let person = Person { id: 42, name: "Bob".to_owned(), age: 0 };
 
-    let buffer = encode_value(&person).unwrap();
-    let result: Person = decode_value(&buffer).unwrap();
+    let buffer = encode(&person).unwrap();
+    let result: Person = decode(&buffer).unwrap();
     assert_eq!(person, result);
 }
 ```
 
-`encode_value` / `decode_value` are the one-shot helpers: they allocate, write a **raw** value (no length
-prefix of its own) and require the whole buffer to be consumed. When the allocation matters, drive
-the allocator over a caller-provided slice instead:
+`encode` / `decode` are the one-shot helpers: they allocate, write a **raw** value (no length
+prefix of its own) and require the whole buffer to be consumed for fixed-size types. When the
+allocation matters, drive the allocator over a caller-provided slice instead:
 
 ```rust
 let person = Person { id: 7, name: "Alice".to_owned(), age: 30 };
@@ -73,9 +73,9 @@ let back = Person::decode(bytes).unwrap();
 A value stored inside a container, or concatenated with its own length prefix, uses the `auto`
 position — `encode_auto` / `decode_auto`. That is what containers and `Option<T>` call internally,
 and it is how a run of values is written and read back one at a time. On the read side there is no
-decoder type: a cursor is a plain `&mut &[u8]`, advanced by the free functions in `binary`
-(`decode`, `decode_with_length_prefix`); the write-side counterpart for a payload that is
-already a byte slice is `encode_with_length_prefix`:
+decoder type: a cursor is a plain `&mut &[u8]`, advanced by the free functions in
+`binary::converter` (`decode`, `decode_with_length_prefix`); the write-side counterpart for a
+payload that is already a byte slice is `encode_with_length_prefix` in the same module:
 
 ```rust
 let people = vec![Person { id: 1, name: "A".to_owned(), age: 0 }];
