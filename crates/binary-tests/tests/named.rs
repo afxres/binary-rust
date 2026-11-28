@@ -3,10 +3,8 @@
 //! `Person` is a hand-written stand-in for what the derive macro will generate:
 //! required `id` / `name`, plus an optional `age` that is omitted when default.
 
-use binary::{
-    decode_named_member, encode_named_member, Allocator, Decode, Encode, Error, Layout,
-    NamedMembers,
-};
+use binary::components::{decode_named_member, encode_named_member, NamedMembers};
+use binary::{Allocator, Decode, Encode, Error, Layout};
 
 mod common;
 

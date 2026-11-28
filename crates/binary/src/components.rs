@@ -1,6 +1,8 @@
-//! Named object support.
+//! Named object components.
 //!
-//! Wire form of one member:
+//! Mirrors the C++ `binary::components` namespace: the building blocks a named
+//! (or tuple) object's encoder and decoder are assembled from. Wire form of one
+//! member:
 //!
 //! ```text
 //! [prefix(name)] [name bytes] [prefix(value)] [value payload]

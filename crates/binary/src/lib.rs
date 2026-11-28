@@ -8,12 +8,12 @@ extern crate std;
 mod allocator;
 mod codec;
 mod collections;
+pub mod components;
 mod container;
 mod converter;
 mod error;
 mod hex;
 mod length;
-mod named;
 mod oneshot;
 mod option;
 mod pod;
@@ -27,7 +27,6 @@ pub use converter::{
     encode_with_length_prefix,
 };
 pub use error::{Error, Result};
-pub use named::{decode_named_member, encode_named_member, NamedMembers};
 pub use oneshot::{decode_value, encode_value};
 
 // Derive macros share the names of the traits (macro namespace vs type

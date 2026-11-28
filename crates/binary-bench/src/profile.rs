@@ -18,7 +18,8 @@
 
 use std::hint::black_box;
 
-use binary::{encode_named_member, Allocator, Decode, Encode, NamedMembers};
+use binary::components::{encode_named_member, NamedMembers};
+use binary::{Allocator, Decode, Encode};
 
 use crate::harness::{allocs, bench, bench_ret, header};
 use crate::wire::{named_value, tuple_value, Type01, TypeX1};

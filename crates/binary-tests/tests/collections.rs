@@ -2,7 +2,8 @@
 //! through `auto`. See `binary::collections` module docs and `DESIGN.md` §17.3
 //! for the three-way wire argument and the ordering caveat.
 
-use binary::{decode_value, encode_named_member, encode_value, Allocator, Encode, Layout};
+use binary::components::encode_named_member;
+use binary::{decode_value, encode_value, Allocator, Encode, Layout};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};

@@ -143,7 +143,7 @@ pub fn run() {
     // 7.5 ns for the same thing; this is the same-session control).
     bench("named parse only (4 names)", || {
         let buf: &[u8] = std::hint::black_box(&named_raw[..]);
-        let members = binary::NamedMembers::<4>::parse(buf, |name| match name {
+        let members = binary::components::NamedMembers::<4>::parse(buf, |name| match name {
             b"Id" => Some(0),
             b"Name" => Some(1),
             b"List" => Some(2),

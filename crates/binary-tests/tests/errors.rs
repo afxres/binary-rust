@@ -447,7 +447,7 @@ fn test_short_value_is_not_enough_bytes() {
 
 #[test]
 fn test_unknown_name_is_skipped_but_bad_index_is_an_error() {
-    use binary::NamedMembers;
+    use binary::components::NamedMembers;
 
     // One member on the wire: name "ab", value 0x2A.
     let buf = [0x02u8, b'a', b'b', 0x01, 0x2A];

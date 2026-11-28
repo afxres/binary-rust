@@ -1261,7 +1261,7 @@ fn gen_encode_named(info: &Info) -> String {
         match f.kind {
             Kind::Skip => {}
             Kind::Required => out.push_str(&format!(
-                "        ::binary::encode_named_member(__e, {}, {})?;\n",
+                "        ::binary::components::encode_named_member(__e, {}, {})?;\n",
                 f.wire_literal(),
                 f.wire_value()
             )),
@@ -1271,7 +1271,7 @@ fn gen_encode_named(info: &Info) -> String {
                 // `&[u8]: PartialEq<ByteStr>` and `Vec<u8>: PartialEq<ByteString>`
                 // also exist — E0283 on `#[binary(optional)] body: &[u8]`.
                 "        if self.{f} != <{t} as ::core::default::Default>::default() {{ \
-                 ::binary::encode_named_member(__e, {w}, {v})?; }}\n",
+                 ::binary::components::encode_named_member(__e, {w}, {v})?; }}\n",
                 f = f.name,
                 t = f.ty,
                 w = f.wire_literal(),
@@ -1376,7 +1376,7 @@ fn gen_decode_named(info: &Info) -> String {
         "    fn decode(__p: &{lt} [u8]) -> ::binary::Result<Self> {{\n"
     ));
     out.push_str(&format!(
-        "        let __m = ::binary::NamedMembers::<{}>::parse(__p, |__n| match __n {{\n",
+        "        let __m = ::binary::components::NamedMembers::<{}>::parse(__p, |__n| match __n {{\n",
         count_slots(info)
     ));
     out.push_str(&arms);

@@ -11,7 +11,8 @@
 //! borrows, a field written `String` owns; the wire is identical either way, and
 //! there is no second switch that could disagree with the type.
 
-use binary::{encode_named_member, Allocator, Decode, Encode, Error};
+use binary::components::encode_named_member;
+use binary::{Allocator, Decode, Encode, Error};
 
 fn encode_auto<T: Encode>(v: &T) -> Vec<u8> {
     let mut e = Allocator::new();

@@ -2,7 +2,8 @@
 //! those of `T`, in raw, prefixed, and one-shot (also raw) positions. See
 //! `binary::smart_ptr` (module docs) and `DESIGN.md` §9 / §13 / §17.3.
 
-use binary::{decode_value, encode_named_member, encode_value, Allocator, Decode, Encode, Layout};
+use binary::components::encode_named_member;
+use binary::{decode_value, encode_value, Allocator, Decode, Encode, Layout};
 use std::rc::Rc;
 use std::sync::Arc;
 

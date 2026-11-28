@@ -3,7 +3,8 @@
 //! `DerivedPerson` deliberately mirrors the hand-written `Person` in
 //! `named.rs` so the generated code can be checked against the known wire.
 
-use binary::{encode_named_member, Allocator, Decode, Encode};
+use binary::components::encode_named_member;
+use binary::{Allocator, Decode, Encode};
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 struct DerivedPerson {
