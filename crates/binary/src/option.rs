@@ -8,7 +8,7 @@
 //! Neither form carries a length prefix in `auto` position: decoding is
 //! self-delimiting, because the tag is one byte and `T` is either fixed-size or
 //! itself prefixed. A prefix still appears where the framework demands one — a
-//! named-object member value — through the default `encode_with_prefix`.
+//! named-object member value — through the default `encode_with_length_prefix`.
 
 use crate::allocator::Allocator;
 use crate::codec::{Decode, Encode, Layout};

@@ -19,7 +19,7 @@ impl Encode for str {
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         // `str` is UTF-8 by construction, so `len()` is the exact wire byte
         // count: header width is known before the payload moves, and one
         // reservation covers both.
@@ -38,7 +38,7 @@ impl Encode for String {
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         e.append_prefixed_bytes(self.as_bytes())
     }
 }
@@ -65,7 +65,7 @@ impl Encode for &str {
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         e.append_prefixed_bytes(self.as_bytes())
     }
 }
@@ -89,7 +89,7 @@ impl Encode for [u8] {
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         e.append_prefixed_bytes(self)
     }
 }
@@ -106,7 +106,7 @@ impl Encode for &[u8] {
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         e.append_prefixed_bytes(self)
     }
 }
@@ -125,7 +125,7 @@ impl<T> Layout for Vec<T> {
 }
 
 impl<T: Encode> Encode for Vec<T> {
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match T::LEN {
             // O(1): fixed-size elements need no per-element prefix.
             n if n > 0 => e.append_with_length_prefix_bounded(self.len().saturating_mul(n), |e| {
@@ -200,7 +200,7 @@ const fn array_len<T: Layout, const N: usize>() -> usize {
 }
 
 impl<T: Encode, const N: usize> Encode for [T; N] {
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match T::LEN {
             n if n > 0 => {
                 e.append_with_length_prefix_bounded(N.saturating_mul(n), |e| self.encode(e))
@@ -259,7 +259,7 @@ impl<'de, T: Decode<'de>, const N: usize> Decode<'de> for [T; N] {
 //   length implied by the remaining bytes.
 // - `encode_auto`: **every** member uses `auto`, and the tuple adds no header of
 //   its own — so `((a,b),c)` and `(a,b,c)` produce identical bytes.
-// - `encode_with_prefix` keeps the default (prefix + `encode`).
+// - `encode_with_length_prefix` keeps the default (prefix + `encode`).
 // Decode mirrors this with `decode` / `decode_auto`.
 //
 // Generated for 1..=12 members: twelve is where `std` stops implementing

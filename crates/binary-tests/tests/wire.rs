@@ -347,6 +347,33 @@ fn test_encode_with_length_prefix_roundtrip() {
 }
 
 #[test]
+fn test_trait_prefix_pair_matches_free_functions() {
+    // `Encode::encode_with_length_prefix` writes a prefix even for a fixed-size
+    // type, so the bytes equal the free function's for the raw payload.
+    let mut trait_side = Allocator::new();
+    42i32.encode_with_length_prefix(&mut trait_side).unwrap();
+
+    let mut free_side = Allocator::new();
+    binary::encode_with_length_prefix(&mut free_side, &42i32.to_le_bytes()).unwrap();
+    assert_eq!(trait_side.finish().unwrap(), free_side.finish().unwrap());
+
+    // The read half consumes prefix + payload for both `LEN` cases and leaves
+    // the cursor after the last value.
+    let mut e = Allocator::new();
+    42i32.encode_with_length_prefix(&mut e).unwrap();
+    "hello".to_string().encode_with_length_prefix(&mut e).unwrap();
+    let bytes = e.finish().unwrap();
+
+    let mut buf: &[u8] = &bytes;
+    assert_eq!(i32::decode_with_length_prefix(&mut buf).unwrap(), 42);
+    assert_eq!(
+        String::decode_with_length_prefix(&mut buf).unwrap(),
+        "hello"
+    );
+    assert_eq!(buf.len(), 0);
+}
+
+#[test]
 fn test_compact_int_slice_forms() {
     // Slice forms mirror C# `Encode(Span<byte>, int, out bytesWritten)` /
     // `Decode(span, out bytesRead)` and C++ `Encode(std::span, size_t, size_t&)` /
@@ -507,7 +534,7 @@ fn test_append_with_length_prefix_wire_matches_csharp() {
 
 #[test]
 fn test_append_with_length_prefix_path() {
-    // No O(1) length estimate → default encode_with_prefix uses the `append_with_length_prefix` path.
+    // No O(1) length estimate → default encode_with_length_prefix uses the `append_with_length_prefix` path.
     let v = Unpredictable(vec![1u8, 2, 3, 4, 5]);
     let mut e = Allocator::new();
     v.encode_auto(&mut e).unwrap();

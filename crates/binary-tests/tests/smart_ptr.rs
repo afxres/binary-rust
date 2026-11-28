@@ -89,7 +89,7 @@ fn test_smart_ptrs_forward_encode_auto_overrides() {
 }
 
 #[test]
-fn test_smart_ptrs_forward_encode_with_prefix_overrides() {
+fn test_smart_ptrs_forward_encode_with_length_prefix_overrides() {
     // `encode_named_member` always prefixes; `String` has an O(1) append_with_length_prefix_bounded
     // override that a default-method forward would lose (`append_with_length_prefix` fallback).
     let inner = String::from("abc");

@@ -34,7 +34,7 @@ use crate::error::{Error, Result};
 /// Encode one named-object member: `prefix(name) name prefix(value) value`.
 ///
 /// The name takes a single reservation, and the value prefix is unconditional
-/// even for types with `LEN > 0`, so this calls [`Encode::encode_with_prefix`]
+/// even for types with `LEN > 0`, so this calls [`Encode::encode_with_length_prefix`]
 /// directly instead of `auto`.
 ///
 /// A free function rather than a method on [`Allocator`]: a member is not a
@@ -47,7 +47,7 @@ pub fn encode_named_member<T: Encode + ?Sized>(
     value: &T,
 ) -> Result<()> {
     e.append_prefixed_bytes(name)?;
-    value.encode_with_prefix(e)
+    value.encode_with_length_prefix(e)
 }
 
 /// Decode one named-object member: `prefix(name) name prefix(value) value`.

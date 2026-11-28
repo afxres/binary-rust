@@ -26,7 +26,7 @@ impl Layout for Person {
 }
 
 impl Encode for Person {
-    // No length prediction: the default `encode_with_prefix` uses
+    // No length prediction: the default `encode_with_length_prefix` uses
     // `Allocator::append_with_length_prefix` for the object, while each member's value still
     // takes the O(1) precise path (fixed-size `LEN`, or `String::len()`).
     fn encode(&self, e: &mut Allocator<'_>) -> Result<(), Error> {

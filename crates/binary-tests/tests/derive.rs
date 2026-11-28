@@ -376,7 +376,7 @@ enum Msg {
 }
 
 /// A union used as a named-object member: the member value goes through
-/// `encode_with_prefix`, i.e. the `append_with_length_prefix` path over the raw form.
+/// `encode_with_length_prefix`, i.e. the `append_with_length_prefix` path over the raw form.
 #[derive(Debug, PartialEq, Encode, Decode)]
 struct Wrapped {
     shape: Shape,

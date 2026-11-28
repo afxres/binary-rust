@@ -5,7 +5,7 @@
 //! Every sequence here has **one** wire form, byte-for-byte identical to
 //! `Vec<T>`'s raw payload: no element count, no tag, just each element written
 //! through [`Encode::encode_auto`] back to back. The boundary comes from the
-//! *outer* length prefix written by `encode_with_prefix` / `encode_auto`.
+//! *outer* length prefix written by `encode_with_length_prefix` / `encode_auto`.
 //!
 //! Maps encode each entry as a flattened `(K, V)` tuple — `K` then `V`, with
 //! **no pair header** — which is why `(K, V)` flattens in `encode_auto` /
@@ -59,7 +59,7 @@ fn encode_items<'a, T: Encode + 'a>(
     Ok(())
 }
 
-/// Shared `encode_with_prefix`: fixed-size elements take the O(1) reserve path,
+/// Shared `encode_with_length_prefix`: fixed-size elements take the O(1) reserve path,
 /// variable-size ones `Allocator::append_with_length_prefix` — the same split as `Vec<T>`.
 fn encode_items_with_prefix<'a, T: Encode + 'a>(
     len: usize,
@@ -118,7 +118,7 @@ impl<T: Encode> Encode for VecDeque<T> {
         T::encode_bulk(tail, e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match T::LEN {
             n if n > 0 => e.append_with_length_prefix_bounded(self.len().saturating_mul(n), |e| {
                 self.encode(e)
@@ -147,7 +147,7 @@ impl<T: Encode> Encode for LinkedList<T> {
         encode_items(self.iter(), e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_items_with_prefix(self.len(), self.iter(), e)
     }
 }
@@ -173,7 +173,7 @@ macro_rules! impl_ordered_set {
                 encode_items(self.iter(), e)
             }
 
-            fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+            fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
                 encode_items_with_prefix(self.len(), self.iter(), e)
             }
         }
@@ -202,7 +202,7 @@ impl<K: Encode + Ord, V: Encode> Encode for BTreeMap<K, V> {
         encode_pairs(self.iter(), e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_pairs_with_prefix(self.len(), self.iter(), e)
     }
 }
@@ -228,7 +228,7 @@ impl<T: Encode + Eq + Hash, S: BuildHasher> Encode for HashSet<T, S> {
         encode_items(self.iter(), e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_items_with_prefix(self.len(), self.iter(), e)
     }
 }
@@ -253,7 +253,7 @@ impl<K: Encode + Eq + Hash, V: Encode, S: BuildHasher> Encode for HashMap<K, V, 
         encode_pairs(self.iter(), e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_pairs_with_prefix(self.len(), self.iter(), e)
     }
 }
@@ -273,7 +273,7 @@ impl<'de, K: Decode<'de> + Eq + Hash, V: Decode<'de>, S: BuildHasher + Default> 
 
 /// `Cow` is wire-transparent: all three encode methods forward to `B` so a
 /// borrowed and an owned value produce the same bytes (and so `str`'s O(1)
-/// `encode_with_prefix` override is not lost).
+/// `encode_with_length_prefix` override is not lost).
 impl<'a, B> Layout for Cow<'a, B>
 where
     B: Layout + ToOwned + ?Sized,
@@ -289,8 +289,8 @@ where
         <B as Encode>::encode(&**self, e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
-        <B as Encode>::encode_with_prefix(&**self, e)
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+        <B as Encode>::encode_with_length_prefix(&**self, e)
     }
 
     fn encode_auto(&self, e: &mut Allocator<'_>) -> Result<()> {

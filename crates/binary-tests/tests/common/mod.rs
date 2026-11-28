@@ -64,7 +64,7 @@ where
 }
 
 /// A variable-size type with no O(1) length estimate; uses the default
-/// `encode_with_prefix` (`append_with_length_prefix` fallback).
+/// `encode_with_length_prefix` (`append_with_length_prefix` fallback).
 pub struct Unpredictable(pub Vec<u8>);
 
 impl Layout for Unpredictable {

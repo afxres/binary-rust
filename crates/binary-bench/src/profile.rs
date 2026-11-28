@@ -218,20 +218,20 @@ pub fn run() {
         }
         black_box(e.as_bytes());
     });
-    bench("String::encode_with_prefix", || {
+    bench("String::encode_with_length_prefix", || {
         let mut e = Allocator::on_slice(&mut buf);
         for _ in 0..REPEAT {
             black_box(&strings)
-                .encode_with_prefix(&mut e)
+                .encode_with_length_prefix(&mut e)
                 .expect("fits");
         }
         black_box(e.as_bytes());
     });
-    bench("Vec<u8>::encode_with_prefix", || {
+    bench("Vec<u8>::encode_with_length_prefix", || {
         let mut e = Allocator::on_slice(&mut buf);
         for _ in 0..REPEAT {
             black_box(&vec_payload)
-                .encode_with_prefix(&mut e)
+                .encode_with_length_prefix(&mut e)
                 .expect("fits");
         }
         black_box(e.as_bytes());

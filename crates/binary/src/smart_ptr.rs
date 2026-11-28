@@ -38,7 +38,7 @@ macro_rules! impl_transparent {
 
         impl<T: Encode + ?Sized> Encode for $ty<T> {
             // All three are forwarded explicitly. The default `encode_auto` /
-            // `encode_with_prefix` dispatch on `Self::LEN` and would silently
+            // `encode_with_length_prefix` dispatch on `Self::LEN` and would silently
             // lose an override on `T` (tuple flattening, `Option<T>`, the O(1)
             // prefix of `String`).
             #[inline]
@@ -47,8 +47,8 @@ macro_rules! impl_transparent {
             }
 
             #[inline]
-            fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
-                (**self).encode_with_prefix(e)
+            fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+                (**self).encode_with_length_prefix(e)
             }
 
             #[inline]

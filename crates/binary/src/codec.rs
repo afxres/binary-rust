@@ -1,5 +1,5 @@
 use crate::allocator::Allocator;
-use crate::converter::{decode_with_length_prefix, take};
+use crate::converter::take;
 use crate::error::Result;
 
 use alloc::vec::Vec;
@@ -20,7 +20,7 @@ pub trait Layout {
 pub trait Encode: Layout {
     /// Write raw payload bytes. Implementations must never write a length
     /// prefix themselves — prefixes belong to [`Encode::encode_auto`] and
-    /// [`Encode::encode_with_prefix`].
+    /// [`Encode::encode_with_length_prefix`].
     fn encode(&self, e: &mut Allocator<'_>) -> Result<()>;
 
     /// Write an unconditional `prefix + payload`.
@@ -29,7 +29,7 @@ pub trait Encode: Layout {
     /// types) and falls back to the `append_with_length_prefix` path otherwise. Converters
     /// that know their length in O(1) — `String`, byte slices, `len() * LEN` —
     /// override it. `encode_named_member` uses this for every member value.
-    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_with_length_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match Self::LEN {
             0 => e.append_with_length_prefix(|e| self.encode(e)),
             n => e.append_with_length_prefix_bounded(n, |e| self.encode(e)),
@@ -44,7 +44,7 @@ pub trait Encode: Layout {
     /// including the last one, and the tuple contributes no header.
     fn encode_auto(&self, e: &mut Allocator<'_>) -> Result<()> {
         match Self::LEN {
-            0 => self.encode_with_prefix(e),
+            0 => self.encode_with_length_prefix(e),
             _ => self.encode(e),
         }
     }
@@ -96,15 +96,23 @@ pub trait Decode<'de>: Layout + Sized {
     /// one), as do self-delimiting types (`Option<T>`).
     fn decode_auto(buf: &mut &'de [u8]) -> Result<Self> {
         match Self::LEN {
-            0 => {
-                let payload = decode_with_length_prefix(buf)?;
-                Self::decode(payload)
-            }
+            0 => Self::decode_with_length_prefix(buf),
             n => {
                 let payload = take(buf, n)?;
                 Self::decode(payload)
             }
         }
+    }
+
+    /// Read an unconditional `prefix + payload`, the read half of
+    /// [`Encode::encode_with_length_prefix`].
+    ///
+    /// Always consumes a prefix, even for `LEN > 0` — unlike `auto`, where a
+    /// fixed-size value carries none. The prefix's declared length is not
+    /// checked against `LEN`; the impl reports a short payload as
+    /// `NotEnoughBytes` on its own.
+    fn decode_with_length_prefix(buf: &mut &'de [u8]) -> Result<Self> {
+        Self::decode(crate::converter::decode_with_length_prefix(buf)?)
     }
 
     /// Read `count` fixed-size values out of a payload of exactly
