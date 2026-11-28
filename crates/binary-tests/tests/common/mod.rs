@@ -47,7 +47,7 @@ pub fn split_prefixed(bytes: &[u8]) -> (usize, &[u8]) {
 pub fn with_header(payload: &[u8]) -> Vec<u8> {
     let h = if payload.len() <= 127 { 1 } else { 4 };
     let mut out = vec![0u8; h + payload.len()];
-    binary::encode_slice(&mut out, payload.len() as u32).unwrap();
+    binary::converter::encode_slice(&mut out, payload.len() as u32).unwrap();
     out[h..].copy_from_slice(payload);
     out
 }

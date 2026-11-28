@@ -311,7 +311,7 @@ fn test_append_with_length_prefix_bounded_scope() {
     assert_eq!(bytes, &[5, b'h', b'e', b'l', b'l', b'o']);
 
     let mut buf: &[u8] = &bytes;
-    let payload = binary::decode_with_length_prefix(&mut buf).unwrap();
+    let payload = binary::converter::decode_with_length_prefix(&mut buf).unwrap();
     let result = core::str::from_utf8(payload).unwrap();
     assert_eq!(result, "hello");
     assert_eq!(buf.len(), 0);
@@ -321,13 +321,13 @@ fn test_append_with_length_prefix_bounded_scope() {
 fn test_encode_with_length_prefix_roundtrip() {
     // Payload <= 127 writes the 1-byte header.
     let mut e = Allocator::new();
-    binary::encode_with_length_prefix(&mut e, b"hello").unwrap();
+    binary::converter::encode_with_length_prefix(&mut e, b"hello").unwrap();
     assert_eq!(e.finish().unwrap(), &[5, b'h', b'e', b'l', b'l', b'o']);
 
     // Payload > 127 writes the fixed 4-byte header with bit 31 set.
     let payload = vec![0x7Fu8; 128];
     let mut e = Allocator::new();
-    binary::encode_with_length_prefix(&mut e, &payload).unwrap();
+    binary::converter::encode_with_length_prefix(&mut e, &payload).unwrap();
     let bytes = e.finish().unwrap();
     assert_eq!(&bytes[..4], &[0x80, 0x00, 0x00, 128]);
     assert_eq!(&bytes[4..], payload.as_slice());
@@ -335,14 +335,14 @@ fn test_encode_with_length_prefix_roundtrip() {
     // Both come back through the read half.
     let mut buf: &[u8] = &bytes;
     assert_eq!(
-        binary::decode_with_length_prefix(&mut buf).unwrap(),
+        binary::converter::decode_with_length_prefix(&mut buf).unwrap(),
         payload.as_slice()
     );
     assert_eq!(buf.len(), 0);
 
     // Empty payload still writes the prefix.
     let mut e = Allocator::new();
-    binary::encode_with_length_prefix(&mut e, b"").unwrap();
+    binary::converter::encode_with_length_prefix(&mut e, b"").unwrap();
     assert_eq!(e.finish().unwrap(), &[0]);
 }
 
@@ -354,7 +354,7 @@ fn test_trait_prefix_pair_matches_free_functions() {
     42i32.encode_with_length_prefix(&mut trait_side).unwrap();
 
     let mut free_side = Allocator::new();
-    binary::encode_with_length_prefix(&mut free_side, &42i32.to_le_bytes()).unwrap();
+    binary::converter::encode_with_length_prefix(&mut free_side, &42i32.to_le_bytes()).unwrap();
     assert_eq!(trait_side.finish().unwrap(), free_side.finish().unwrap());
 
     // The read half consumes prefix + payload for both `LEN` cases and leaves
@@ -381,17 +381,17 @@ fn test_compact_int_slice_forms() {
     let mut buf = [0u8; 8];
 
     // Wide header: four bytes written, four read.
-    assert_eq!(binary::encode_slice(&mut buf[..4], 200).unwrap(), 4);
+    assert_eq!(binary::converter::encode_slice(&mut buf[..4], 200).unwrap(), 4);
     assert_eq!(&buf[..4], &[0x80, 0x00, 0x00, 200]);
-    assert_eq!(binary::decode_slice(&buf[..4]).unwrap(), (200, 4));
+    assert_eq!(binary::converter::decode_slice(&buf[..4]).unwrap(), (200, 4));
 
     // Narrow header: one byte each way.
-    assert_eq!(binary::encode_slice(&mut buf[4..], 7).unwrap(), 1);
-    assert_eq!(binary::decode_slice(&buf[4..]).unwrap(), (7, 1));
+    assert_eq!(binary::converter::encode_slice(&mut buf[4..], 7).unwrap(), 1);
+    assert_eq!(binary::converter::decode_slice(&buf[4..]).unwrap(), (7, 1));
 
     // The cursor form reads the same bytes and advances only on success.
     let mut probe: &[u8] = &buf[..4];
-    assert_eq!(binary::decode(&mut probe).unwrap(), 200);
+    assert_eq!(binary::converter::decode(&mut probe).unwrap(), 200);
     assert_eq!(probe.len(), 0);
 }
 
@@ -401,7 +401,7 @@ fn test_encode_with_length_prefix_borrowed_overflow() {
     let mut backing = [0u8; 4];
     let mut e = Allocator::on_slice(&mut backing);
     assert_eq!(
-        binary::encode_with_length_prefix(&mut e, b"12345"),
+        binary::converter::encode_with_length_prefix(&mut e, b"12345"),
         Err(Error::BufferFull)
     );
 }
@@ -700,22 +700,22 @@ fn test_compact_int_width() {
     // The union tag is a "compact integer": wire-identical to a length prefix,
     // because C# encodes both through the same `NumberModule.Encode`.
     let mut e = Allocator::new();
-    ::binary::encode(&mut e, 0).unwrap();
-    ::binary::encode(&mut e, 127).unwrap();
+    ::binary::converter::encode(&mut e, 0).unwrap();
+    ::binary::converter::encode(&mut e, 127).unwrap();
     assert_eq!(e.as_bytes(), &[0x00, 0x7F]);
 
     let mut e = Allocator::new();
-    ::binary::encode(&mut e, 128).unwrap();
+    ::binary::converter::encode(&mut e, 128).unwrap();
     assert_eq!(e.as_bytes(), &[0x80, 0x00, 0x00, 0x80]);
 
     for v in [0u32, 1, 127, 128, 255, 65_535, i32::MAX as u32] {
         let mut e = Allocator::new();
-        ::binary::encode(&mut e, v).unwrap();
+        ::binary::converter::encode(&mut e, v).unwrap();
         let bytes = e.finish().unwrap();
         let width = if v <= 127 { 1 } else { 4 };
         assert_eq!(bytes.len(), width);
         let mut buf: &[u8] = &bytes;
-        assert_eq!(::binary::decode(&mut buf).unwrap(), v);
+        assert_eq!(::binary::converter::decode(&mut buf).unwrap(), v);
         assert_eq!(buf.len(), 0);
     }
 }
@@ -723,7 +723,7 @@ fn test_compact_int_width() {
 #[test]
 fn test_compact_int_truncated() {
     let mut buf: &[u8] = &[0x80, 0x00, 0x00];
-    assert_eq!(::binary::decode(&mut buf), Err(Error::NotEnoughBytes));
+    assert_eq!(::binary::converter::decode(&mut buf), Err(Error::NotEnoughBytes));
 }
 
 // ---- `Layout::LEN` ----

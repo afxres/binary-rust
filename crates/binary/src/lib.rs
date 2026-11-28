@@ -10,7 +10,7 @@ mod codec;
 mod collections;
 pub mod components;
 mod container;
-mod converter;
+pub mod converter;
 mod error;
 mod hex;
 mod length;
@@ -22,10 +22,6 @@ mod smart_ptr;
 
 pub use allocator::Allocator;
 pub use codec::{Decode, Encode, Layout};
-pub use converter::{
-    decode, decode_slice, decode_with_length_prefix, encode, encode_slice,
-    encode_with_length_prefix,
-};
 pub use error::{Error, Result};
 pub use oneshot::{decode_value, encode_value};
 

@@ -6,7 +6,8 @@
 //! path that needs it is pinned by the `16` / `17` byte assertions in
 //! `binary-tests`.
 
-use binary::{decode_slice, encode_slice, Error};
+use binary::converter::{decode_slice, encode_slice};
+use binary::Error;
 
 /// The wire length is a signed 31-bit field. Spelled out rather than imported:
 /// the literal is the spec.

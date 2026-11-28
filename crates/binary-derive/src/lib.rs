@@ -1593,7 +1593,7 @@ fn gen_encode_union(info: &UnionInfo) -> String {
         for (tag, v) in info.variants.iter().enumerate() {
             out.push_str(&format!("            {} => {{\n", variant_pattern(v)));
             out.push_str(&format!(
-                "                ::binary::encode(__e, {tag}u32)?;\n"
+                "                ::binary::converter::encode(__e, {tag}u32)?;\n"
             ));
             let n = v.fields.len();
             for j in 0..n {
@@ -1628,12 +1628,12 @@ fn gen_decode_union(info: &UnionInfo) -> String {
             format!("    fn decode(__p: &{lt} [u8]) -> ::binary::Result<Self> {{\n")
         });
         if auto {
-            out.push_str("        let __tag = ::binary::decode(__buf)?;\n");
+            out.push_str("        let __tag = ::binary::converter::decode(__buf)?;\n");
         } else {
             // Raw position: the tag is the value's own boundary; every field
             // after it reads from what the tag leaves behind.
             out.push_str("        let mut __cur = __p;\n");
-            out.push_str("        let __tag = ::binary::decode(&mut __cur)?;\n");
+            out.push_str("        let __tag = ::binary::converter::decode(&mut __cur)?;\n");
         }
         out.push_str("        match __tag {\n");
         for (tag, v) in info.variants.iter().enumerate() {

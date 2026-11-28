@@ -310,7 +310,7 @@ fn test_named_append_with_length_prefix_path() {
     assert_eq!(bytes[0], 9);
 
     let mut buf: &[u8] = &bytes;
-    let payload = binary::decode_with_length_prefix(&mut buf).unwrap();
+    let payload = binary::converter::decode_with_length_prefix(&mut buf).unwrap();
     let m = NamedMembers::<1>::parse(payload, |n| match n {
         b"blob" => Some(0),
         _ => None,

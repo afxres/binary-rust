@@ -1,6 +1,13 @@
 //! Free functions over raw slices and allocators — the compact integer family,
 //! plus the two prefixed-payload writers.
 //!
+//! The module stands where C# keeps its non-generic `Converter` static class and
+//! C++ its root-namespace `binary::Encode` / `Decode` overloads: whole-value
+//! encoding is on the [`Encode`] / [`Decode`] traits instead, so the free
+//! functions here only cover the integer and prefix primitives. The path
+//! qualification is what separates `converter::encode` (a compact integer) from
+//! the crate-level one-shot writer.
+//!
 //! There is no decoder type. A cursor is `&mut &[u8]`: every function consumes
 //! from the front, advances the slice **only on success**, and borrows the
 //! pieces it returns from the underlying buffer (not from the cursor), so

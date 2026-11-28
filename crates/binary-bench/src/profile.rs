@@ -501,7 +501,7 @@ pub fn run() {
     let big_bytes = e.finish().expect("owned");
     // Strip the outer auto prefix so each row starts at the same payload.
     let mut buf: &[u8] = &big_bytes;
-    let big_payload = ::binary::decode_with_length_prefix(&mut buf).expect("prefix");
+    let big_payload = ::binary::converter::decode_with_length_prefix(&mut buf).expect("prefix");
 
     bench_ret("decode &[u8] 1KiB (zero copy)", || {
         let buf: &[u8] = black_box(big_payload);

@@ -355,7 +355,7 @@ fn test_truncated_payload_is_a_short_read() {
     let buf = [0x80u8, 0x00];
     let mut buf: &[u8] = &buf;
     assert_eq!(
-        binary::decode_with_length_prefix(&mut buf),
+        binary::converter::decode_with_length_prefix(&mut buf),
         Err(Error::NotEnoughBytes)
     );
 
@@ -363,7 +363,7 @@ fn test_truncated_payload_is_a_short_read() {
     let buf = [0x04u8, 0xAA];
     let mut buf: &[u8] = &buf;
     assert_eq!(
-        binary::decode_with_length_prefix(&mut buf),
+        binary::converter::decode_with_length_prefix(&mut buf),
         Err(Error::NotEnoughBytes)
     );
 
@@ -413,17 +413,17 @@ fn test_compact_int_beyond_i32_max_is_rejected() {
     // `debug_assert!` here, i.e. it wrote a silently wrong tag.
     let mut e = Allocator::new();
     assert_eq!(
-        ::binary::encode(&mut e, i32::MAX as u32 + 1).unwrap_err(),
+        ::binary::converter::encode(&mut e, i32::MAX as u32 + 1).unwrap_err(),
         Error::LengthTooLarge
     );
     assert_eq!(e.len(), 0, "the guard runs before anything is written");
 
     // The largest legal tag still round-trips, and it is the all-ones wide form.
-    ::binary::encode(&mut e, i32::MAX as u32).unwrap();
+    ::binary::converter::encode(&mut e, i32::MAX as u32).unwrap();
     let bytes = e.finish().unwrap();
     assert_eq!(bytes, [0xFF, 0xFF, 0xFF, 0xFF]);
     let mut buf: &[u8] = &bytes;
-    assert_eq!(::binary::decode(&mut buf).unwrap(), i32::MAX as u32);
+    assert_eq!(::binary::converter::decode(&mut buf).unwrap(), i32::MAX as u32);
 }
 
 #[test]
