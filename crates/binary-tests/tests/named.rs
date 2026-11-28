@@ -4,7 +4,8 @@
 //! required `id` / `name`, plus an optional `age` that is omitted when default.
 
 use binary::{
-    read_named_member, write_named_member, Allocator, Decode, Encode, Error, Layout, NamedMembers,
+    decode_named_member, encode_named_member, Allocator, Decode, Encode, Error, Layout,
+    NamedMembers,
 };
 
 mod common;
@@ -29,10 +30,10 @@ impl Encode for Person {
     // `Allocator::append_with_length_prefix` for the object, while each member's value still
     // takes the O(1) precise path (fixed-size `LEN`, or `String::len()`).
     fn encode(&self, e: &mut Allocator<'_>) -> Result<(), Error> {
-        write_named_member(e, b"id", &self.id)?;
-        write_named_member(e, b"name", &self.name)?;
+        encode_named_member(e, b"id", &self.id)?;
+        encode_named_member(e, b"name", &self.name)?;
         if self.age != 0 {
-            write_named_member(e, b"age", &self.age)?;
+            encode_named_member(e, b"age", &self.age)?;
         }
         Ok(())
     }
@@ -53,7 +54,7 @@ impl<'de> Decode<'de> for Person {
         Ok(Person {
             id: m.value(0, "id")?,
             name: m.value(1, "name")?,
-            age: m.optional(2)?,
+            age: m.value_or_default(2)?,
         })
     }
 }
@@ -238,7 +239,7 @@ fn test_named_long_name_4byte_prefix() {
     impl Encode for LongName {
         fn encode(&self, e: &mut Allocator<'_>) -> Result<(), Error> {
             let name = "n".repeat(200);
-            write_named_member(e, name.as_bytes(), &7i32)
+            encode_named_member(e, name.as_bytes(), &7i32)
         }
     }
 
@@ -256,16 +257,16 @@ fn test_named_long_name_4byte_prefix() {
 }
 
 #[test]
-fn test_read_named_member_pairs_name_with_raw_payload() {
-    // The read half of `write_named_member`: both prefixes are consumed by one
+fn test_decode_named_member_pairs_name_with_raw_payload() {
+    // The read half of `encode_named_member`: both prefixes are consumed by one
     // call, and the payload comes back without its prefix, so a slot is decoded
     // with `T::decode` and not `auto`.
     let mut e = Allocator::new();
-    write_named_member(&mut e, b"id", &7i32).unwrap();
+    encode_named_member(&mut e, b"id", &7i32).unwrap();
     let bytes = e.finish().unwrap();
 
     let mut buf: &[u8] = &bytes;
-    let (name, payload) = read_named_member(&mut buf).unwrap();
+    let (name, payload) = decode_named_member(&mut buf).unwrap();
     assert_eq!(name, b"id");
     assert_eq!(payload, &7i32.to_le_bytes()[..]);
     assert_eq!(buf.len(), 0);
@@ -303,7 +304,7 @@ impl Encode for Opaque {
 fn test_named_append_with_length_prefix_path() {
     // Both the object and its member fall back to the prefixed path.
     let mut e = Allocator::new();
-    e.append_with_length_prefix(|e| write_named_member(e, b"blob", &Opaque(vec![1, 2, 3])))
+    e.append_with_length_prefix(|e| encode_named_member(e, b"blob", &Opaque(vec![1, 2, 3])))
         .unwrap();
     let bytes = e.finish().unwrap();
 

@@ -137,9 +137,9 @@ impl<T: Encode> Encode for Vec<T> {
     }
 
     fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
-        // Delegated to the element: fixed-width scalars override `encode_slice`
+        // Delegated to the element: fixed-width scalars override `encode_bulk`
         // with one bulk write, everything else gets the loop (`codec.rs`).
-        T::encode_slice(self, e)
+        T::encode_bulk(self, e)
     }
 }
 
@@ -157,8 +157,8 @@ impl<'de, T: Decode<'de>> Decode<'de> for Vec<T> {
                     return Ok(Vec::new());
                 }
                 // Same delegation on the way in; a type that does not override
-                // `decode_slice` runs `T::decode` per value.
-                let vec = T::decode_slice(payload, count)?;
+                // `decode_bulk` runs `T::decode` per value.
+                let vec = T::decode_bulk(payload, count)?;
                 debug_assert_eq!(vec.len(), count);
                 Ok(vec)
             }
@@ -210,7 +210,7 @@ impl<T: Encode, const N: usize> Encode for [T; N] {
     }
 
     fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
-        T::encode_slice(self, e)
+        T::encode_bulk(self, e)
     }
 }
 

@@ -34,7 +34,7 @@ containers keep working, and `cargo test -p binary --no-default-features` is par
 ## Basic Usage
 
 ```rust
-use binary::{Decode, Encode, Allocator, from_slice, to_vec};
+use binary::{Decode, Encode, Allocator, decode_value, encode_value};
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 struct Person {
@@ -48,13 +48,13 @@ struct Person {
 fn main() {
     let person = Person { id: 42, name: "Bob".to_owned(), age: 0 };
 
-    let buffer = to_vec(&person).unwrap();
-    let result: Person = from_slice(&buffer).unwrap();
+    let buffer = encode_value(&person).unwrap();
+    let result: Person = decode_value(&buffer).unwrap();
     assert_eq!(person, result);
 }
 ```
 
-`to_vec` / `from_slice` are the one-shot helpers: they allocate, write a **raw** value (no length
+`encode_value` / `decode_value` are the one-shot helpers: they allocate, write a **raw** value (no length
 prefix of its own) and require the whole buffer to be consumed. When the allocation matters, drive
 the allocator over a caller-provided slice instead:
 

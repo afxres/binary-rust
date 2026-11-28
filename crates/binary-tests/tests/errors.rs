@@ -432,15 +432,15 @@ fn test_short_value_is_not_enough_bytes() {
     // larger than the buffer compares, never adds, so the slice arithmetic
     // cannot panic — it just reports the short read.
     assert_eq!(
-        binary::from_slice::<u128>(&[1, 2, 3]),
+        binary::decode_value::<u128>(&[1, 2, 3]),
         Err(Error::NotEnoughBytes)
     );
     assert_eq!(
-        binary::from_slice::<u32>(&[1, 2, 3]),
+        binary::decode_value::<u32>(&[1, 2, 3]),
         Err(Error::NotEnoughBytes)
     );
     assert_eq!(
-        binary::from_slice::<[u8; 3]>(&[1, 2, 3]).unwrap(),
+        binary::decode_value::<[u8; 3]>(&[1, 2, 3]).unwrap(),
         [1, 2, 3]
     );
 }

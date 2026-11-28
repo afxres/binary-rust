@@ -14,7 +14,7 @@
 //! Decoding delegates to `Vec<T>::decode`, which already derives the element
 //! count for fixed-size elements, rejects misaligned payloads with the
 //! "misaligned element payload" error, and leaves the bulk-or-loop decision to
-//! the element's `decode_slice` hook. Each container is then built with `collect()`.
+//! the element's `decode_bulk` hook. Each container is then built with `collect()`.
 //!
 //! # Ordering is *not* a wire guarantee
 //!
@@ -114,8 +114,8 @@ impl<T: Encode> Encode for VecDeque<T> {
         // keeps whatever the element offers — the scalars' bulk write, or the
         // per-element loop for everything else (`codec.rs`).
         let (head, tail) = self.as_slices();
-        T::encode_slice(head, e)?;
-        T::encode_slice(tail, e)
+        T::encode_bulk(head, e)?;
+        T::encode_bulk(tail, e)
     }
 
     fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {

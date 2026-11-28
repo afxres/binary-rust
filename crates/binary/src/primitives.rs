@@ -26,7 +26,7 @@ macro_rules! impl_fixed {
                 // pattern; a wider one is byte-identical to the wire only on a
                 // little-endian target, so the arm compiles away elsewhere.
                 #[inline]
-                fn encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()> {
+                fn encode_bulk(items: &[Self], e: &mut Allocator<'_>) -> Result<()> {
                     if mem::size_of::<Self>() == 1 || cfg!(target_endian = "little") {
                         // SAFETY: fixed-width scalar — `LEN == size_of`, no
                         // padding, all bit patterns valid, nothing owned, and
@@ -54,9 +54,9 @@ macro_rules! impl_fixed {
                 }
 
                 #[inline]
-                fn decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>> {
+                fn decode_bulk(payload: &'de [u8], count: usize) -> Result<Vec<Self>> {
                     if mem::size_of::<Self>() == 1 || cfg!(target_endian = "little") {
-                        // SAFETY: as in `encode_slice` above; every bit pattern
+                        // SAFETY: as in `encode_bulk` above; every bit pattern
                         // of a fixed-width scalar is a valid value, and the
                         // type owns nothing.
                         unsafe { crate::pod::read_bulk(payload, count) }
@@ -88,7 +88,7 @@ impl Encode for usize {
     }
 
     #[inline]
-    fn encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_bulk(items: &[Self], e: &mut Allocator<'_>) -> Result<()> {
         // Never 1 byte, so the bulk arm only exists on a little-endian target.
         if cfg!(target_endian = "little") {
             // SAFETY: `LEN == size_of`, no padding, every bit pattern valid,
@@ -111,9 +111,9 @@ impl<'de> Decode<'de> for usize {
     }
 
     #[inline]
-    fn decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>> {
+    fn decode_bulk(payload: &'de [u8], count: usize) -> Result<Vec<Self>> {
         if cfg!(target_endian = "little") {
-            // SAFETY: as in `encode_slice` above.
+            // SAFETY: as in `encode_bulk` above.
             unsafe { crate::pod::read_bulk(payload, count) }
         } else {
             let mut values = Vec::with_capacity(count);
@@ -136,7 +136,7 @@ impl Encode for isize {
     }
 
     #[inline]
-    fn encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()> {
+    fn encode_bulk(items: &[Self], e: &mut Allocator<'_>) -> Result<()> {
         // Never 1 byte, so the bulk arm only exists on a little-endian target.
         if cfg!(target_endian = "little") {
             // SAFETY: `LEN == size_of`, no padding, every bit pattern valid,
@@ -159,9 +159,9 @@ impl<'de> Decode<'de> for isize {
     }
 
     #[inline]
-    fn decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>> {
+    fn decode_bulk(payload: &'de [u8], count: usize) -> Result<Vec<Self>> {
         if cfg!(target_endian = "little") {
-            // SAFETY: as in `encode_slice` above.
+            // SAFETY: as in `encode_bulk` above.
             unsafe { crate::pod::read_bulk(payload, count) }
         } else {
             let mut values = Vec::with_capacity(count);

@@ -3,7 +3,7 @@
 //! These rows have no counterpart in the other two repositories — C# measures
 //! collections in its own `Benchmarks.CollectionTests` suite over different
 //! payloads, and the C++ integration suite has only the two objects. What they
-//! answer is internal: what `i32`'s `encode_slice` override and the POD bulk
+//! answer is internal: what `i32`'s `encode_bulk` override and the POD bulk
 //! decode buy, and what keeping `bool` off both paths costs (§19.10).
 //!
 //! Buffers and measurement rules are the ones from `wire`: one borrowed buffer
@@ -19,7 +19,7 @@ use crate::harness::{bench, bench_ret, header};
 ///
 /// Exists only to measure that path against the bulk one on the same 4-byte
 /// payload: `Vec<LoopI32>` and `Vec<i32>` differ in nothing but the
-/// `encode_slice` override, so the gap between the two rows is the value of the
+/// `encode_bulk` override, so the gap between the two rows is the value of the
 /// fast path.
 #[derive(Clone, Copy)]
 struct LoopI32(i32);
@@ -53,7 +53,7 @@ pub fn run() {
     header("collections: bulk vs per element (Rust)");
 
     // Container fast path: 1024 `i32` = 4096 payload bytes. The two encode rows
-    // are the same bytes written two ways — bulk (`i32`'s `encode_slice`) vs per
+    // are the same bytes written two ways — bulk (`i32`'s `encode_bulk`) vs per
     // element (`LoopI32`'s default) — so their difference is exactly what the
     // override buys. C++ decides the same question in `ContainerConverter`
     // (`copy` flag) and C# in `Benchmarks.CollectionTests`.

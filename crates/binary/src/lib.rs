@@ -22,11 +22,13 @@ mod smart_ptr;
 
 pub use allocator::Allocator;
 pub use codec::{Decode, Encode, Layout};
-pub use converter::{decode, decode_with_length_prefix, encode, encode_with_length_prefix};
+pub use converter::{
+    decode, decode_slice, decode_with_length_prefix, encode, encode_slice,
+    encode_with_length_prefix,
+};
 pub use error::{Error, Result};
-pub use length::{decode_prefix, encode_prefix, encode_prefix_wide, prefix_header_len};
-pub use named::{read_named_member, write_named_member, NamedMembers};
-pub use oneshot::{from_slice, to_vec};
+pub use named::{decode_named_member, encode_named_member, NamedMembers};
+pub use oneshot::{decode_value, encode_value};
 
 // Derive macros share the names of the traits (macro namespace vs type
 // namespace), so `use binary::Encode` brings in both.

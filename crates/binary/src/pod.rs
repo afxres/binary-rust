@@ -1,7 +1,7 @@
 //! The bulk (memcpy) arms — the only place this crate reinterprets a slice of
 //! values as payload bytes.
 //!
-//! Both are reached only from the `encode_slice` / `decode_slice` overrides in
+//! Both are reached only from the `encode_bulk` / `decode_bulk` overrides in
 //! `primitives.rs`, behind a condition that is a compile-time constant there
 //! (`size_of::<T>() == 1`, which has no byte order to get wrong, or a
 //! little-endian target). The overrides are `#[doc(hidden)]` trait methods, so

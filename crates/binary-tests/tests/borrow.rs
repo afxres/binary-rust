@@ -11,7 +11,7 @@
 //! borrows, a field written `String` owns; the wire is identical either way, and
 //! there is no second switch that could disagree with the type.
 
-use binary::{write_named_member, Allocator, Decode, Encode, Error};
+use binary::{encode_named_member, Allocator, Decode, Encode, Error};
 
 fn encode_auto<T: Encode>(v: &T) -> Vec<u8> {
     let mut e = Allocator::new();
@@ -105,7 +105,7 @@ fn test_borrowed_str_rejects_invalid_utf8() {
     // wire — the failure comes from `str::from_utf8`, exactly as it would for a
     // hand-written `&'de str` member.
     let mut e = Allocator::new();
-    write_named_member(&mut e, b"Kind", &[0xffu8, 0xfe][..]).unwrap();
+    encode_named_member(&mut e, b"Kind", &[0xffu8, 0xfe][..]).unwrap();
     let bytes = e.finish().unwrap();
 
     let buf = &bytes;

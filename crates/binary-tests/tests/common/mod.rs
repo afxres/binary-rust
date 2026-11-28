@@ -40,10 +40,14 @@ pub fn split_prefixed(bytes: &[u8]) -> (usize, &[u8]) {
 
 /// Build `prefix + payload` with the minimal header width. Used to hand-craft
 /// wire input for decoder tests.
+///
+/// The width rule is spelled out here rather than imported: it is the wire rule,
+/// so pinning the helper to bytes is stronger than pinning it to a crate symbol
+/// (same reasoning as the local `PREFIX_SHRINK_LIMIT` in `wire.rs`).
 pub fn with_header(payload: &[u8]) -> Vec<u8> {
-    let h = binary::prefix_header_len(payload.len());
+    let h = if payload.len() <= 127 { 1 } else { 4 };
     let mut out = vec![0u8; h + payload.len()];
-    binary::encode_prefix(&mut out, payload.len()).unwrap();
+    binary::encode_slice(&mut out, payload.len() as u32).unwrap();
     out[h..].copy_from_slice(payload);
     out
 }

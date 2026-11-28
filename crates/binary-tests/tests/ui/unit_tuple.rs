@@ -1,3 +1,3 @@
 fn main() {
-    let _ = binary::to_vec(&());
+    let _ = binary::encode_value(&());
 }

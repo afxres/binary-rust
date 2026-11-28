@@ -1,17 +1,22 @@
 use crate::error::{Error, Result};
 
 /// Maximum length expressible in a single 1-byte prefix.
-pub const SINGLE_BYTE_MAX: usize = 0x7F;
+pub(crate) const SINGLE_BYTE_MAX: usize = 0x7F;
 
 /// Maximum length expressible in a 4-byte prefix (signed 31-bit).
-pub const MAX_LENGTH: usize = i32::MAX as usize;
+pub(crate) const MAX_LENGTH: usize = i32::MAX as usize;
 
 /// Returns the number of bytes needed to encode `len` as a length prefix.
 ///
 /// - `len <= 127` → 1 byte
 /// - `len > 127` → 4 bytes (big-endian, bit 31 set as marker)
+///
+/// `pub(crate)` like the rest of this module. C# keeps `NumberModule.EncodeLength`
+/// internal and C++ keeps `EncodeLengthPrefixLength` in `binary::internal`, so
+/// the public surface has no counterpart: a caller that reserves room for a
+/// prefix leaves 4 bytes and shrinks to what the writer reports.
 #[inline]
-pub const fn prefix_header_len(len: usize) -> usize {
+pub(crate) const fn prefix_header_len(len: usize) -> usize {
     if len <= SINGLE_BYTE_MAX {
         1
     } else {
@@ -26,7 +31,7 @@ pub const fn prefix_header_len(len: usize) -> usize {
 /// [`Error::BufferFull`]. Callers that reserved `prefix_header_len(len)` bytes
 /// can still `?` the result.
 #[inline]
-pub fn encode_prefix(buf: &mut [u8], len: usize) -> Result<usize> {
+pub(crate) fn encode_prefix(buf: &mut [u8], len: usize) -> Result<usize> {
     if len > MAX_LENGTH {
         return Err(Error::LengthTooLarge);
     }
@@ -48,7 +53,7 @@ pub fn encode_prefix(buf: &mut [u8], len: usize) -> Result<usize> {
 /// longer be shifted: a 1-byte prefix would leave three stale bytes in front of
 /// the payload.
 #[inline]
-pub fn encode_prefix_wide(buf: &mut [u8], len: usize) -> Result<usize> {
+pub(crate) fn encode_prefix_wide(buf: &mut [u8], len: usize) -> Result<usize> {
     if len > MAX_LENGTH {
         return Err(Error::LengthTooLarge);
     }
@@ -66,7 +71,7 @@ pub fn encode_prefix_wide(buf: &mut [u8], len: usize) -> Result<usize> {
 /// Bit 7 of the first byte selects the width: clear → 1 byte, set → 4 bytes
 /// big-endian with the high bit masked off.
 #[inline]
-pub fn decode_prefix(buf: &[u8], pos: &mut usize) -> Result<usize> {
+pub(crate) fn decode_prefix(buf: &[u8], pos: &mut usize) -> Result<usize> {
     if *pos >= buf.len() {
         return Err(Error::NotEnoughBytes);
     }

@@ -70,7 +70,7 @@ fn test_vec_string() {
 
 #[test]
 fn test_bulk_and_loop_containers_are_byte_identical() {
-    // `Vec<T>` and `[T; N]` hand their payload to `T::encode_slice`, which is
+    // `Vec<T>` and `[T; N]` hand their payload to `T::encode_bulk`, which is
     // the per-element loop for every type that does not override it (all of
     // them outside this crate) and one bulk write for the fixed-width scalars
     // on a little-endian target. That is an optimization, not a wire change:
@@ -347,25 +347,25 @@ fn test_encode_with_length_prefix_roundtrip() {
 }
 
 #[test]
-fn test_span_variants_compose_from_the_slice_api() {
-    // C# `Encode(Span<byte>, int, out bytesWritten)` / `Decode(span, out bytesRead)`
-    // have no free-function counterpart; both compose from the slice API.
+fn test_compact_int_slice_forms() {
+    // Slice forms mirror C# `Encode(Span<byte>, int, out bytesWritten)` /
+    // `Decode(span, out bytesRead)` and C++ `Encode(std::span, size_t, size_t&)` /
+    // `Decode(std::span, size_t&)`; the allocator and cursor forms stay separate.
     let mut buf = [0u8; 8];
-    let mut a = Allocator::on_slice(&mut buf);
-    binary::encode(&mut a, 200).unwrap();
-    assert_eq!(a.len(), 4);
-    assert_eq!(&buf[..4], &[0x80, 0x00, 0x00, 200]);
 
-    // Reading without advancing: decode on a copy, report the header width.
+    // Wide header: four bytes written, four read.
+    assert_eq!(binary::encode_slice(&mut buf[..4], 200).unwrap(), 4);
+    assert_eq!(&buf[..4], &[0x80, 0x00, 0x00, 200]);
+    assert_eq!(binary::decode_slice(&buf[..4]).unwrap(), (200, 4));
+
+    // Narrow header: one byte each way.
+    assert_eq!(binary::encode_slice(&mut buf[4..], 7).unwrap(), 1);
+    assert_eq!(binary::decode_slice(&buf[4..]).unwrap(), (7, 1));
+
+    // The cursor form reads the same bytes and advances only on success.
     let mut probe: &[u8] = &buf[..4];
     assert_eq!(binary::decode(&mut probe).unwrap(), 200);
-    assert_eq!(4 - probe.len(), 4);
-
-    // Narrow header: one byte written, one byte read.
-    assert_eq!(binary::encode_prefix(&mut buf[4..], 7).unwrap(), 1);
-    let mut probe: &[u8] = &buf[4..5];
-    assert_eq!(binary::decode(&mut probe).unwrap(), 7);
-    assert_eq!(1 - probe.len(), 1);
+    assert_eq!(probe.len(), 0);
 }
 
 #[test]
@@ -685,7 +685,8 @@ fn test_compact_int_width() {
         let mut e = Allocator::new();
         ::binary::encode(&mut e, v).unwrap();
         let bytes = e.finish().unwrap();
-        assert_eq!(bytes.len(), binary::prefix_header_len(v as usize));
+        let width = if v <= 127 { 1 } else { 4 };
+        assert_eq!(bytes.len(), width);
         let mut buf: &[u8] = &bytes;
         assert_eq!(::binary::decode(&mut buf).unwrap(), v);
         assert_eq!(buf.len(), 0);
@@ -770,34 +771,34 @@ fn test_oneshot_helpers_round_trip() {
     // the payload (C# `Converter<T>::Encode` / `Decode`, C++ same). Contrast
     // with `encode_auto`, which prefixes variable-length values.
     let v = (1024i32, String::from("csharp"), vec![7i32, 11]);
-    let bytes = binary::to_vec(&v).unwrap();
+    let bytes = binary::encode_value(&v).unwrap();
     let mut e = Allocator::new();
     v.encode(&mut e).unwrap();
     assert_eq!(bytes, e.finish().unwrap());
 
-    let back: (i32, String, Vec<i32>) = binary::from_slice(&bytes).unwrap();
+    let back: (i32, String, Vec<i32>) = binary::decode_value(&bytes).unwrap();
     assert_eq!(back, v);
 
     // The raw form is observable: a lone string has no header byte, and a
     // fixed-length container is just its elements back to back.
     assert_eq!(
-        binary::to_vec(&"hello".to_string()).unwrap(),
+        binary::encode_value(&"hello".to_string()).unwrap(),
         b"hello".to_vec()
     );
     assert_eq!(
-        binary::from_slice::<String>(&b"hello"[..]).unwrap(),
+        binary::decode_value::<String>(&b"hello"[..]).unwrap(),
         "hello"
     );
     assert_eq!(
-        binary::to_vec(&vec![1i32, 2]).unwrap(),
+        binary::encode_value(&vec![1i32, 2]).unwrap(),
         vec![1, 0, 0, 0, 2, 0, 0, 0]
     );
 
     // Leftover bytes are rejected: a fixed-size value leaves a visible tail.
     // (Variable-length raw decoders consume the whole slice by definition.)
-    let mut extra = binary::to_vec(&42i32).unwrap();
+    let mut extra = binary::encode_value(&42i32).unwrap();
     extra.push(0);
-    let err = binary::from_slice::<i32>(&extra).unwrap_err();
+    let err = binary::decode_value::<i32>(&extra).unwrap_err();
     assert!(matches!(err, Error::Message(_)), "{err:?}");
 }
 
@@ -868,7 +869,7 @@ fn test_bool_and_char_validate_on_the_way_in() {
 
 #[test]
 fn test_vec_of_fixed_arrays_round_trips() {
-    // `[i32; N]` forwards its whole slice to `i32::encode_slice`, so the array
+    // `[i32; N]` forwards its whole slice to `i32::encode_bulk`, so the array
     // layer adds no per-element overhead of its own; decoding an array is per
     // element and must agree on any target.
     let v = vec![[1i32, -2], [3, 4], [i32::MIN, i32::MAX]];

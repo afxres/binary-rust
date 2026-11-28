@@ -290,7 +290,7 @@ struct Field {
 }
 
 impl Field {
-    /// `b"..."` literal used in generated `match` arms and `write_named_member`.
+    /// `b"..."` literal used in generated `match` arms and `encode_named_member`.
     fn wire_literal(&self) -> String {
         Literal::byte_string(&self.wire).to_string()
     }
@@ -1261,7 +1261,7 @@ fn gen_encode_named(info: &Info) -> String {
         match f.kind {
             Kind::Skip => {}
             Kind::Required => out.push_str(&format!(
-                "        ::binary::write_named_member(__e, {}, {})?;\n",
+                "        ::binary::encode_named_member(__e, {}, {})?;\n",
                 f.wire_literal(),
                 f.wire_value()
             )),
@@ -1271,7 +1271,7 @@ fn gen_encode_named(info: &Info) -> String {
                 // `&[u8]: PartialEq<ByteStr>` and `Vec<u8>: PartialEq<ByteString>`
                 // also exist — E0283 on `#[binary(optional)] body: &[u8]`.
                 "        if self.{f} != <{t} as ::core::default::Default>::default() {{ \
-                 ::binary::write_named_member(__e, {w}, {v})?; }}\n",
+                 ::binary::encode_named_member(__e, {w}, {v})?; }}\n",
                 f = f.name,
                 t = f.ty,
                 w = f.wire_literal(),
@@ -1362,7 +1362,7 @@ fn gen_decode_named(info: &Info) -> String {
                 f.name
             )),
             (None, Kind::Optional) => {
-                inits.push_str(&format!("{}: __m.optional({})?", f.name, slot))
+                inits.push_str(&format!("{}: __m.value_or_default({})?", f.name, slot))
             }
             (None, _) => inits.push_str(&format!("{}: __m.value({}, {})?", f.name, slot, name)),
         }

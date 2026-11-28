@@ -3,7 +3,7 @@
 //! `DerivedPerson` deliberately mirrors the hand-written `Person` in
 //! `named.rs` so the generated code can be checked against the known wire.
 
-use binary::{write_named_member, Allocator, Decode, Encode};
+use binary::{encode_named_member, Allocator, Decode, Encode};
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 struct DerivedPerson {
@@ -671,7 +671,7 @@ fn test_with_member_matches_repr_wire() {
 fn test_with_converter_error_is_not_a_wire_error() {
     // `-1` is a perfectly valid `i64` payload; only the converter rejects it.
     let mut e = Allocator::new();
-    write_named_member(&mut e, b"Elapsed", &-1i64).unwrap();
+    encode_named_member(&mut e, b"Elapsed", &-1i64).unwrap();
     let bytes = e.finish().unwrap();
 
     let buf = &bytes;

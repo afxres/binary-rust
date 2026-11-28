@@ -18,7 +18,7 @@
 
 use std::hint::black_box;
 
-use binary::{write_named_member, Allocator, Decode, Encode, NamedMembers};
+use binary::{encode_named_member, Allocator, Decode, Encode, NamedMembers};
 
 use crate::harness::{allocs, bench, bench_ret, header};
 use crate::wire::{named_value, tuple_value, Type01, TypeX1};
@@ -465,11 +465,11 @@ pub fn run() {
         flat_many(&mut buf, &mut pos, &src, REPEAT);
         black_box(&buf[..pos]);
     });
-    bench("write_named_member(Id, i32)", || {
+    bench("encode_named_member(Id, i32)", || {
         let mut e = Allocator::on_slice(&mut buf);
         for _ in 0..REPEAT {
             let n = black_box(name_id);
-            write_named_member(&mut e, &n, &black_box(1024i32)).expect("fits");
+            encode_named_member(&mut e, &n, &black_box(1024i32)).expect("fits");
         }
         black_box(e.as_bytes());
     });
@@ -483,10 +483,11 @@ pub fn run() {
         }
         black_box(e.as_bytes());
     });
-    bench("write_named_member(Name, String)", || {
+    bench("encode_named_member(Name, String)", || {
         let mut e = Allocator::on_slice(&mut buf);
         for _ in 0..REPEAT {
-            write_named_member(&mut e, black_box(&b"Name"[..]), black_box(&strings)).expect("fits");
+            encode_named_member(&mut e, black_box(&b"Name"[..]), black_box(&strings))
+                .expect("fits");
         }
         black_box(e.as_bytes());
     });

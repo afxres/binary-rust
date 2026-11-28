@@ -28,7 +28,7 @@ pub trait Encode: Layout {
     /// The default picks the header width from `LEN` (O(1) for fixed-size
     /// types) and falls back to the `append_with_length_prefix` path otherwise. Converters
     /// that know their length in O(1) — `String`, byte slices, `len() * LEN` —
-    /// override it. `write_named_member` uses this for every member value.
+    /// override it. `encode_named_member` uses this for every member value.
     fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match Self::LEN {
             0 => e.append_with_length_prefix(|e| self.encode(e)),
@@ -61,7 +61,7 @@ pub trait Encode: Layout {
     /// §19.16). An override must produce exactly the bytes the loop would, and
     /// must not write a length prefix.
     #[doc(hidden)]
-    fn encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()>
+    fn encode_bulk(items: &[Self], e: &mut Allocator<'_>) -> Result<()>
     where
         Self: Sized,
     {
@@ -81,13 +81,13 @@ pub trait Decode<'de>: Layout + Sized {
     /// cursor before calling, mirroring C#'s `Decode(in span)` on a converter
     /// with a fixed `Length`; an impl may assume the length and must not read
     /// past it. For `LEN == 0` types the slice is everything the value owns in
-    /// this position: all remaining bytes in raw position ([`from_slice`],
+    /// this position: all remaining bytes in raw position ([`decode_value`],
     /// tuple tails), the prefix-declared payload in `auto` position.
     ///
     /// A fixed-size impl validates cheaply and reports a short payload as
     /// `NotEnoughBytes`; nothing on a framework path panics.
     ///
-    /// [`from_slice`]: crate::from_slice
+    /// [`decode_value`]: crate::decode_value
     fn decode(payload: &'de [u8]) -> Result<Self>;
 
     /// Decode the value in `auto` position: fixed-size types are sliced by
@@ -111,7 +111,7 @@ pub trait Decode<'de>: Layout + Sized {
     /// `count * Self::LEN` bytes.
     ///
     /// **Internal extension point, not part of the documented surface** — the
-    /// decode-side counterpart of [`Encode::encode_slice`] (`DESIGN.md` §19.16).
+    /// decode-side counterpart of [`Encode::encode_bulk`] (`DESIGN.md` §19.16).
     /// The caller has already sliced the payload to exactly
     /// `count * Self::LEN` bytes, with `Self::LEN > 0`.
     ///
@@ -119,7 +119,7 @@ pub trait Decode<'de>: Layout + Sized {
     /// obligation: every bit pattern must be a valid value and the type must
     /// own nothing.
     #[doc(hidden)]
-    fn decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>>
+    fn decode_bulk(payload: &'de [u8], count: usize) -> Result<Vec<Self>>
     where
         Self: Sized,
     {
