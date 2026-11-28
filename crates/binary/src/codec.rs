@@ -1,5 +1,5 @@
-use crate::decoder::Decoder;
-use crate::encoder::Encoder;
+use crate::allocator::Allocator;
+use crate::converter::{decode_with_length_prefix, take};
 use crate::error::Result;
 
 use alloc::vec::Vec;
@@ -21,18 +21,18 @@ pub trait Encode: Layout {
     /// Write raw payload bytes. Implementations must never write a length
     /// prefix themselves — prefixes belong to [`Encode::encode_auto`] and
     /// [`Encode::encode_with_prefix`].
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()>;
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()>;
 
     /// Write an unconditional `prefix + payload`.
     ///
     /// The default picks the header width from `LEN` (O(1) for fixed-size
-    /// types) and falls back to the `write_prefixed` path otherwise. Converters
+    /// types) and falls back to the `append_with_length_prefix` path otherwise. Converters
     /// that know their length in O(1) — `String`, byte slices, `len() * LEN` —
     /// override it. `write_named_member` uses this for every member value.
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match Self::LEN {
-            0 => e.write_prefixed(|e| self.encode(e)),
-            n => e.write_prefixed_bounded(n, |e| self.encode(e)),
+            0 => e.append_with_length_prefix(|e| self.encode(e)),
+            n => e.append_with_length_prefix_bounded(n, |e| self.encode(e)),
         }
     }
 
@@ -42,7 +42,7 @@ pub trait Encode: Layout {
     ///
     /// **Tuples override this** to flatten: every member goes through `auto`,
     /// including the last one, and the tuple contributes no header.
-    fn encode_auto(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_auto(&self, e: &mut Allocator<'_>) -> Result<()> {
         match Self::LEN {
             0 => self.encode_with_prefix(e),
             _ => self.encode(e),
@@ -61,7 +61,7 @@ pub trait Encode: Layout {
     /// §19.16). An override must produce exactly the bytes the loop would, and
     /// must not write a length prefix.
     #[doc(hidden)]
-    fn encode_slice(items: &[Self], e: &mut Encoder<'_>) -> Result<()>
+    fn encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()>
     where
         Self: Sized,
     {
@@ -74,35 +74,60 @@ pub trait Encode: Layout {
 
 /// Decode a value from raw bytes (no length prefix).
 pub trait Decode<'de>: Layout + Sized {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self>;
+    /// Decode from the bytes that belong to this value — the slice model, no
+    /// cursor in the signature.
+    ///
+    /// For `LEN > 0` types the framework slices exactly `LEN` bytes off the
+    /// cursor before calling, mirroring C#'s `Decode(in span)` on a converter
+    /// with a fixed `Length`; an impl may assume the length and must not read
+    /// past it. For `LEN == 0` types the slice is everything the value owns in
+    /// this position: all remaining bytes in raw position ([`from_slice`],
+    /// tuple tails), the prefix-declared payload in `auto` position.
+    ///
+    /// A fixed-size impl validates cheaply and reports a short payload as
+    /// `NotEnoughBytes`; nothing on a framework path panics.
+    ///
+    /// [`from_slice`]: crate::from_slice
+    fn decode(payload: &'de [u8]) -> Result<Self>;
 
-    /// Decode the value in `auto` position. Tuples override this to flatten
-    /// (all members decoded via `auto`, including the last one).
-    fn decode_auto(d: &mut Decoder<'de>) -> Result<Self> {
+    /// Decode the value in `auto` position: fixed-size types are sliced by
+    /// `LEN`, variable-size types read a length prefix first. Tuples override
+    /// this to flatten (all members decoded via `auto`, including the last
+    /// one), as do self-delimiting types (`Option<T>`).
+    fn decode_auto(buf: &mut &'de [u8]) -> Result<Self> {
         match Self::LEN {
-            0 => d.with_prefix(|d| Self::decode(d)),
-            _ => Self::decode(d),
+            0 => {
+                let payload = decode_with_length_prefix(buf)?;
+                Self::decode(payload)
+            }
+            n => {
+                let payload = take(buf, n)?;
+                Self::decode(payload)
+            }
         }
     }
 
-    /// Read `count` fixed-size values, one element at a time by default.
+    /// Read `count` fixed-size values out of a payload of exactly
+    /// `count * Self::LEN` bytes.
     ///
     /// **Internal extension point, not part of the documented surface** — the
     /// decode-side counterpart of [`Encode::encode_slice`] (`DESIGN.md` §19.16).
-    /// The caller has already checked that the payload is exactly
+    /// The caller has already sliced the payload to exactly
     /// `count * Self::LEN` bytes, with `Self::LEN > 0`.
     ///
     /// An override that memcpys wire bytes straight in takes over the
     /// obligation: every bit pattern must be a valid value and the type must
     /// own nothing.
     #[doc(hidden)]
-    fn decode_slice(d: &mut Decoder<'de>, count: usize) -> Result<Vec<Self>>
+    fn decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>>
     where
         Self: Sized,
     {
         let mut values = Vec::with_capacity(count);
+        let mut rest = payload;
         for _ in 0..count {
-            values.push(Self::decode(d)?);
+            let p = take(&mut rest, Self::LEN)?;
+            values.push(Self::decode(p)?);
         }
         Ok(values)
     }

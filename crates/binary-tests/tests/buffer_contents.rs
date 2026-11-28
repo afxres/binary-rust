@@ -20,13 +20,13 @@
 
 mod common;
 
-use binary::Encoder;
+use binary::Allocator;
 use common::cases::{case_names, encode_case, encode_case_into};
 
-/// Slack for the `write_prefixed` tail margin. The compaction reproduces the
+/// Slack for the `append_with_length_prefix` tail margin. The compaction reproduces the
 /// owned 1-byte header only when there are `(-length) & 7` spare bytes past the
 /// payload; without them the 4-byte header is kept (valid wire, and what C#/C++
-/// do with a tight buffer — `test_write_prefixed_borrowed_tail_margin`). Worst
+/// do with a tight buffer — `test_append_with_length_prefix_borrowed_tail_margin`). Worst
 /// case for the innermost prefix is 3 extra header bytes plus 7 pad. Those bytes
 /// are never written, so their value does not matter — which is the point.
 const SLACK: usize = 16;
@@ -38,7 +38,7 @@ fn test_wire_is_independent_of_buffer_contents() {
 
         for fill in [0x00u8, 0x5a, 0xff] {
             let mut buf = vec![fill; expected.len() + SLACK];
-            let mut e = Encoder::on_slice(&mut buf);
+            let mut e = Allocator::on_slice(&mut buf);
             encode_case_into(name, &mut e);
             assert_eq!(
                 e.as_bytes(),
@@ -51,7 +51,7 @@ fn test_wire_is_independent_of_buffer_contents() {
         // Owned with no initial capacity: growth copies the written prefix and
         // leaves the rest alone, so a converter that relied on fresh zeroes past
         // the watermark would diverge on the first growth.
-        let mut e = Encoder::with_capacity(0);
+        let mut e = Allocator::with_capacity(0);
         encode_case_into(name, &mut e);
         assert_eq!(e.finish().unwrap(), expected, "{name}: growing from empty");
     }

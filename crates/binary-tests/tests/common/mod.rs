@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use binary::{Decode, Decoder, Encode, Encoder, Error, Layout};
+use binary::{Allocator, Decode, Encode, Error, Layout};
 
 pub mod cases;
 
@@ -14,16 +14,16 @@ pub fn round_trip<T>(v: &T) -> T
 where
     T: for<'de> Decode<'de> + Encode,
 {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
-    let mut d = Decoder::new(&bytes);
-    T::decode_auto(&mut d).unwrap()
+    let mut buf: &[u8] = &bytes;
+    T::decode_auto(&mut buf).unwrap()
 }
 
 /// Number of bytes a length header occupies, detected from the marker bit the
 /// same way `decode_prefix` does. Needed because the encoder is free to keep a
-/// 4-byte header on short payloads (`write_prefixed` path, `payload > 16`).
+/// 4-byte header on short payloads (`append_with_length_prefix` path, `payload > 16`).
 pub fn header_width(first: u8) -> usize {
     if first & 0x80 == 0 {
         1
@@ -52,15 +52,15 @@ pub fn round_trip_raw<T>(v: &T) -> T
 where
     T: for<'de> Decode<'de> + Encode,
 {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode(&mut e).unwrap();
     let bytes = e.finish().unwrap();
-    let mut d = Decoder::new(&bytes);
-    T::decode(&mut d).unwrap()
+    let buf = &bytes;
+    T::decode(buf).unwrap()
 }
 
 /// A variable-size type with no O(1) length estimate; uses the default
-/// `encode_with_prefix` (`write_prefixed` fallback).
+/// `encode_with_prefix` (`append_with_length_prefix` fallback).
 pub struct Unpredictable(pub Vec<u8>);
 
 impl Layout for Unpredictable {
@@ -68,15 +68,14 @@ impl Layout for Unpredictable {
 }
 
 impl Encode for Unpredictable {
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<(), Error> {
-        e.write(&self.0)
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<(), Error> {
+        e.append(&self.0)
     }
 }
 
 impl<'de> Decode<'de> for Unpredictable {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self, Error> {
-        let bytes = d.take(d.remaining())?;
-        Ok(Unpredictable(bytes.to_vec()))
+    fn decode(payload: &'de [u8]) -> Result<Self, Error> {
+        Ok(Unpredictable(payload.to_vec()))
     }
 }
 

@@ -1,6 +1,6 @@
 //! `Error` (closed enum) vs `Box<dyn Error + Send + Sync>` (fully erased).
 //!
-//! The point is to price the four things the decision in DESIGN §18.8 turns on:
+//! The point is to price the four things the decision in DESIGN §18.1 turns on:
 //!
 //! 1. construction — `Error::NotEnoughBytes` is a constant, the boxed form is an
 //!    allocation;
@@ -18,7 +18,7 @@
 use std::fmt;
 use std::mem::size_of;
 
-use binary::{Decode, Decoder, Encode, Error};
+use binary::{Decode, Encode, Error};
 
 use crate::harness::{allocs, bench, bench_ret, header};
 
@@ -105,12 +105,12 @@ fn payload() -> Vec<i32> {
     (0..COUNT as i32).collect()
 }
 
-fn decode_enum(d: &mut Decoder<'_>) -> binary::Result<Vec<i32>> {
-    Vec::<i32>::decode_auto(d)
+fn decode_enum(buf: &mut &[u8]) -> binary::Result<Vec<i32>> {
+    Vec::<i32>::decode_auto(buf)
 }
 
-fn decode_dyn(d: &mut Decoder<'_>) -> DynResult<Vec<i32>> {
-    Ok(Vec::<i32>::decode_auto(d)?)
+fn decode_dyn(buf: &mut &[u8]) -> DynResult<Vec<i32>> {
+    Ok(Vec::<i32>::decode_auto(buf)?)
 }
 
 pub fn run() {
@@ -167,16 +167,16 @@ pub fn run() {
     println!();
 
     println!("-- happy path: decode Vec<i32> (n = {COUNT}) --");
-    let mut e = binary::Encoder::new();
+    let mut e = binary::Allocator::new();
     payload().encode_auto(&mut e).expect("infallible");
     let bytes = e.finish().expect("owned");
     bench_ret("decode -> binary::Result", || {
-        let mut d = Decoder::new(std::hint::black_box(&bytes));
-        decode_enum(&mut d).expect("valid")
+        let mut buf: &[u8] = std::hint::black_box(&bytes);
+        decode_enum(&mut buf).expect("valid")
     });
     bench_ret("decode -> DynResult", || {
-        let mut d = Decoder::new(std::hint::black_box(&bytes));
-        decode_dyn(&mut d).expect("valid")
+        let mut buf: &[u8] = std::hint::black_box(&bytes);
+        decode_dyn(&mut buf).expect("valid")
     });
     println!();
 

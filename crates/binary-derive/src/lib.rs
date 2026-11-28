@@ -371,7 +371,7 @@ impl Generics {
         }
     }
 
-    /// The lifetime the generated `Decoder` / `&'de [u8]` types use.
+    /// The decode lifetime the generated `&'de [u8]` slices use.
     fn decode_lt(&self) -> &str {
         match &self.decl {
             Some(d) => &d[1..d.len() - 1],
@@ -1180,7 +1180,8 @@ fn parse_struct(p: &mut Parser, mode: Mode) -> Res<Info> {
         }
     } else {
         // Duplicate wire names compile fine as patterns but make the value
-        // undecodable: the second occurrence always reports `DuplicateMember`.
+        // undecodable: the second occurrence always reports the duplicate
+        // named-member error.
         for (i, f) in fields.iter().enumerate() {
             if let Some(g) = fields[..i].iter().find(|g| g.wire == f.wire) {
                 return Err(Error::at(
@@ -1254,7 +1255,7 @@ fn gen_encode_named(info: &Info) -> String {
         info.generics.self_ty(&info.name)
     ));
     out.push_str(
-        "    fn encode(&self, __e: &mut ::binary::Encoder<'_>) -> ::binary::Result<()> {\n",
+        "    fn encode(&self, __e: &mut ::binary::Allocator<'_>) -> ::binary::Result<()> {\n",
     );
     for f in &info.fields {
         match f.kind {
@@ -1295,7 +1296,7 @@ fn gen_encode_tuple(info: &Info) -> String {
     ));
 
     out.push_str(
-        "    fn encode(&self, __e: &mut ::binary::Encoder<'_>) -> ::binary::Result<()> {\n",
+        "    fn encode(&self, __e: &mut ::binary::Allocator<'_>) -> ::binary::Result<()> {\n",
     );
     let (last, head) = info.fields.split_last().expect("checked non-empty");
     for f in head {
@@ -1311,7 +1312,7 @@ fn gen_encode_tuple(info: &Info) -> String {
     out.push_str("    }\n");
 
     out.push_str(
-        "    fn encode_auto(&self, __e: &mut ::binary::Encoder<'_>) -> ::binary::Result<()> {\n",
+        "    fn encode_auto(&self, __e: &mut ::binary::Allocator<'_>) -> ::binary::Result<()> {\n",
     );
     for f in &info.fields {
         out.push_str(&format!(
@@ -1348,11 +1349,11 @@ fn gen_decode_named(info: &Info) -> String {
         match (&f.with, f.kind) {
             // The payload is already isolated by `NamedMembers::parse`, so a
             // converter decodes it exactly like `T::decode` would — same
-            // `Decoder::new(payload)`, only the function differs.
+            // payload slice, only the function differs.
             (Some(m), Kind::Optional) => inits.push_str(&format!(
                 "{}: match __m.get({slot}) {{ \
                  ::core::option::Option::Some(__p) => \
-                 {m}::from(::binary::Decode::decode(&mut ::binary::Decoder::new(__p))?)?, \
+                 {m}::from(::binary::Decode::decode(__p)?)?, \
                  ::core::option::Option::None => ::core::default::Default::default() }}",
                 f.name
             )),
@@ -1372,10 +1373,10 @@ fn gen_decode_named(info: &Info) -> String {
     let mut out = String::new();
     out.push_str(&format!("{} {{\n", info.generics.decode_impl(&info.name)));
     out.push_str(&format!(
-        "    fn decode(__d: &mut ::binary::Decoder<{lt}>) -> ::binary::Result<Self> {{\n"
+        "    fn decode(__p: &{lt} [u8]) -> ::binary::Result<Self> {{\n"
     ));
     out.push_str(&format!(
-        "        let __m = ::binary::NamedMembers::<{}>::parse(__d, |__n| match __n {{\n",
+        "        let __m = ::binary::NamedMembers::<{}>::parse(__p, |__n| match __n {{\n",
         count_slots(info)
     ));
     out.push_str(&arms);
@@ -1413,13 +1414,14 @@ fn gen_decode_tuple(info: &Info) -> String {
     out.push_str(&format!("{} {{\n", info.generics.decode_impl(&info.name)));
 
     out.push_str(&format!(
-        "    fn decode(__d: &mut ::binary::Decoder<{lt}>) -> ::binary::Result<Self> {{\n"
+        "    fn decode(__p: &{lt} [u8]) -> ::binary::Result<Self> {{\n"
     ));
+    out.push_str("        let mut __cur = __p;\n");
     let (last, head) = info.fields.split_last().expect("checked non-empty");
     for f in head {
-        out.push_str(&declare(f, "::binary::Decode::decode_auto(__d)?"));
+        out.push_str(&declare(f, "::binary::Decode::decode_auto(&mut __cur)?"));
     }
-    out.push_str(&declare(last, "::binary::Decode::decode(__d)?"));
+    out.push_str(&declare(last, "::binary::Decode::decode(__cur)?"));
     out.push_str(&format!(
         "        ::core::result::Result::Ok(Self {{ {} }})\n",
         inits
@@ -1427,10 +1429,10 @@ fn gen_decode_tuple(info: &Info) -> String {
     out.push_str("    }\n");
 
     out.push_str(&format!(
-        "    fn decode_auto(__d: &mut ::binary::Decoder<{lt}>) -> ::binary::Result<Self> {{\n"
+        "    fn decode_auto(__buf: &mut &{lt} [u8]) -> ::binary::Result<Self> {{\n"
     ));
     for f in &info.fields {
-        out.push_str(&declare(f, "::binary::Decode::decode_auto(__d)?"));
+        out.push_str(&declare(f, "::binary::Decode::decode_auto(__buf)?"));
     }
     out.push_str(&format!(
         "        ::core::result::Result::Ok(Self {{ {} }})\n",
@@ -1456,7 +1458,7 @@ fn gen_encode_enum(info: &EnumInfo) -> String {
         info.generics.self_ty(&info.name)
     ));
     out.push_str(
-        "    fn encode(&self, __e: &mut ::binary::Encoder<'_>) -> ::binary::Result<()> {\n",
+        "    fn encode(&self, __e: &mut ::binary::Allocator<'_>) -> ::binary::Result<()> {\n",
     );
     out.push_str("        let __v: ");
     out.push_str(&info.repr);
@@ -1477,10 +1479,10 @@ fn gen_decode_enum(info: &EnumInfo) -> String {
     let lt = info.generics.decode_lt();
     let mut out = format!("{} {{\n", info.generics.decode_impl(&info.name));
     out.push_str(&format!(
-        "    fn decode(__d: &mut ::binary::Decoder<{lt}>) -> ::binary::Result<Self> {{\n"
+        "    fn decode(__p: &{lt} [u8]) -> ::binary::Result<Self> {{\n"
     ));
     out.push_str(&format!(
-        "        let __v = <{} as ::binary::Decode>::decode(__d)?;\n",
+        "        let __v = <{} as ::binary::Decode>::decode(__p)?;\n",
         info.repr
     ));
     out.push_str("        match __v {\n");
@@ -1583,15 +1585,15 @@ fn gen_encode_union(info: &UnionInfo) -> String {
 
     for auto in [false, true] {
         out.push_str(if auto {
-            "    fn encode_auto(&self, __e: &mut ::binary::Encoder<'_>) -> ::binary::Result<()> {\n"
+            "    fn encode_auto(&self, __e: &mut ::binary::Allocator<'_>) -> ::binary::Result<()> {\n"
         } else {
-            "    fn encode(&self, __e: &mut ::binary::Encoder<'_>) -> ::binary::Result<()> {\n"
+            "    fn encode(&self, __e: &mut ::binary::Allocator<'_>) -> ::binary::Result<()> {\n"
         });
         out.push_str("        match self {\n");
         for (tag, v) in info.variants.iter().enumerate() {
             out.push_str(&format!("            {} => {{\n", variant_pattern(v)));
             out.push_str(&format!(
-                "                ::binary::Encoder::write_compact_int(__e, {tag}u32)?;\n"
+                "                ::binary::encode(__e, {tag}u32)?;\n"
             ));
             let n = v.fields.len();
             for j in 0..n {
@@ -1621,11 +1623,18 @@ fn gen_decode_union(info: &UnionInfo) -> String {
 
     for auto in [false, true] {
         out.push_str(&if auto {
-            format!("    fn decode_auto(__d: &mut ::binary::Decoder<{lt}>) -> ::binary::Result<Self> {{\n")
+            format!("    fn decode_auto(__buf: &mut &{lt} [u8]) -> ::binary::Result<Self> {{\n")
         } else {
-            format!("    fn decode(__d: &mut ::binary::Decoder<{lt}>) -> ::binary::Result<Self> {{\n")
+            format!("    fn decode(__p: &{lt} [u8]) -> ::binary::Result<Self> {{\n")
         });
-        out.push_str("        let __tag = ::binary::Decoder::read_compact_int(__d)?;\n");
+        if auto {
+            out.push_str("        let __tag = ::binary::decode(__buf)?;\n");
+        } else {
+            // Raw position: the tag is the value's own boundary; every field
+            // after it reads from what the tag leaves behind.
+            out.push_str("        let mut __cur = __p;\n");
+            out.push_str("        let __tag = ::binary::decode(&mut __cur)?;\n");
+        }
         out.push_str("        match __tag {\n");
         for (tag, v) in info.variants.iter().enumerate() {
             out.push_str(&format!("            {tag}u32 => {{\n"));
@@ -1634,11 +1643,15 @@ fn gen_decode_union(info: &UnionInfo) -> String {
                 let ty = &f.ty;
                 if !auto && j + 1 == n {
                     out.push_str(&format!(
-                        "                let __v{j}: {ty} = ::binary::Decode::decode(__d)?;\n"
+                        "                let __v{j}: {ty} = ::binary::Decode::decode(__cur)?;\n"
+                    ));
+                } else if auto {
+                    out.push_str(&format!(
+                        "                let __v{j}: {ty} = ::binary::Decode::decode_auto(__buf)?;\n"
                     ));
                 } else {
                     out.push_str(&format!(
-                        "                let __v{j}: {ty} = ::binary::Decode::decode_auto(__d)?;\n"
+                        "                let __v{j}: {ty} = ::binary::Decode::decode_auto(&mut __cur)?;\n"
                     ));
                 }
             }
@@ -1650,7 +1663,7 @@ fn gen_decode_union(info: &UnionInfo) -> String {
         }
         out.push_str(
             "            __other => \
-             ::core::result::Result::Err(::binary::Error::InvalidTag(__other)),\n",
+             ::core::result::Result::Err(::binary::Error::message(::core::format_args!(\"invalid union tag: {}\", __other))),\n",
         );
         out.push_str("        }\n    }\n");
     }

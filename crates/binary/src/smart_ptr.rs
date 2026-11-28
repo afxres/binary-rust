@@ -23,9 +23,8 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::sync::Arc;
 
+use crate::allocator::Allocator;
 use crate::codec::{Decode, Encode, Layout};
-use crate::decoder::Decoder;
-use crate::encoder::Encoder;
 use crate::error::Result;
 
 macro_rules! impl_transparent {
@@ -43,30 +42,30 @@ macro_rules! impl_transparent {
             // lose an override on `T` (tuple flattening, `Option<T>`, the O(1)
             // prefix of `String`).
             #[inline]
-            fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+            fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
                 (**self).encode(e)
             }
 
             #[inline]
-            fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+            fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
                 (**self).encode_with_prefix(e)
             }
 
             #[inline]
-            fn encode_auto(&self, e: &mut Encoder<'_>) -> Result<()> {
+            fn encode_auto(&self, e: &mut Allocator<'_>) -> Result<()> {
                 (**self).encode_auto(e)
             }
         }
 
         impl<'de, T: Decode<'de>> Decode<'de> for $ty<T> {
             #[inline]
-            fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-                Ok($ty::new(T::decode(d)?))
+            fn decode(payload: &'de [u8]) -> Result<Self> {
+                Ok($ty::new(T::decode(payload)?))
             }
 
             #[inline]
-            fn decode_auto(d: &mut Decoder<'de>) -> Result<Self> {
-                Ok($ty::new(T::decode_auto(d)?))
+            fn decode_auto(buf: &mut &'de [u8]) -> Result<Self> {
+                Ok($ty::new(T::decode_auto(buf)?))
             }
         }
     };

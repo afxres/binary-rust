@@ -11,10 +11,10 @@
 //! borrows, a field written `String` owns; the wire is identical either way, and
 //! there is no second switch that could disagree with the type.
 
-use binary::{write_named_member, Decode, Decoder, Encode, Encoder, Error};
+use binary::{write_named_member, Allocator, Decode, Encode, Error};
 
 fn encode_auto<T: Encode>(v: &T) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode_auto(&mut e).unwrap();
     e.finish().unwrap()
 }
@@ -23,8 +23,8 @@ fn encode_auto<T: Encode>(v: &T) -> Vec<u8> {
 /// lifetime, which is what a borrowing type needs: `T: for<'de> Decode<'de>`
 /// would only accept types that own their contents.
 fn decode_auto<'de, T: Decode<'de>>(bytes: &'de [u8]) -> T {
-    let mut d = Decoder::new(bytes);
-    T::decode_auto(&mut d).unwrap()
+    let mut buf = bytes;
+    T::decode_auto(&mut buf).unwrap()
 }
 
 /// Borrowed members in a named object, next to an optional one.
@@ -104,15 +104,12 @@ fn test_borrowed_str_rejects_invalid_utf8() {
     // A named object whose `Kind` payload is not UTF-8. The bytes are valid
     // wire — the failure comes from `str::from_utf8`, exactly as it would for a
     // hand-written `&'de str` member.
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     write_named_member(&mut e, b"Kind", &[0xffu8, 0xfe][..]).unwrap();
     let bytes = e.finish().unwrap();
 
-    let mut d = Decoder::new(&bytes);
-    assert_eq!(
-        Frame::decode(&mut d).unwrap_err().to_string(),
-        "invalid UTF-8"
-    );
+    let buf = &bytes;
+    assert_eq!(Frame::decode(buf).unwrap_err().to_string(), "invalid UTF-8");
 }
 
 /// A tuple object of borrowed members: `auto` for all but the last, raw last,
@@ -201,9 +198,9 @@ fn test_lifetime_member_without_borrow_helper() {
 fn test_borrowed_member_truncated_payload() {
     // `Kind` declares 4 bytes but only 2 are present.
     let bytes = [0x04, b'K', b'i', b'n', b'd', 0x04, b'a', b'b'];
-    let mut d = Decoder::new(&bytes);
+    let buf = &bytes;
     // `NamedMembers::parse` reads member payloads with `read_prefix`, which
-    // reports `NotEnoughBytes` (not `PayloadTruncated` — that one belongs to
-    // `with_prefix`, i.e. a value's own prefix).
-    assert_eq!(Frame::decode(&mut d).unwrap_err(), Error::NotEnoughBytes);
+    // reports `NotEnoughBytes` — as does `with_prefix` for a value's own
+    // truncated prefix now that the two short-read shapes share one variant.
+    assert_eq!(Frame::decode(buf).unwrap_err(), Error::NotEnoughBytes);
 }

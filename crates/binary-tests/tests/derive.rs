@@ -3,7 +3,7 @@
 //! `DerivedPerson` deliberately mirrors the hand-written `Person` in
 //! `named.rs` so the generated code can be checked against the known wire.
 
-use binary::{write_named_member, Decode, Decoder, Encode, Encoder};
+use binary::{write_named_member, Allocator, Decode, Encode};
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 struct DerivedPerson {
@@ -89,14 +89,14 @@ struct LiteralForms {
 }
 
 fn encode_auto<T: Encode>(v: &T) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode_auto(&mut e).unwrap();
     e.finish().unwrap()
 }
 
 fn decode_auto<T: for<'de> Decode<'de>>(bytes: &[u8]) -> T {
-    let mut d = Decoder::new(bytes);
-    T::decode_auto(&mut d).unwrap()
+    let mut buf = bytes;
+    T::decode_auto(&mut buf).unwrap()
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn test_csharp_record_wire() {
     // "Id" < "Name" holds either way, so this case is byte-identical for both
     // reasons at once; a type whose declaration order is not alphabetical would
     // match C# only after the ordering question in §1 is decided.
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     p.encode(&mut e).unwrap();
     let raw = e.finish().unwrap();
     assert_eq!(
@@ -205,7 +205,7 @@ fn test_derive_decode_encode_idempotent() {
 fn test_derive_encode_only() {
     // `#[derive(Encode)]` alone provides Layout + Encode; no Decode needed.
     let v = EncodeOnly { value: 7 };
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode(&mut e).unwrap();
     let bytes = e.finish().unwrap();
     assert!(bytes.windows(6).any(|w| w.starts_with(b"\x05value")));
@@ -350,8 +350,8 @@ fn test_derive_enum_repr_u8() {
 #[test]
 fn test_derive_enum_invalid_discriminant() {
     // 32 is not a declared discriminant: decoding must fail, not alias a variant.
-    let mut d = Decoder::new(&[0x20, 0, 0, 0]);
-    assert!(Level::decode_auto(&mut d).is_err(), "32 is not a Level");
+    let mut buf: &[u8] = &[0x20, 0, 0, 0];
+    assert!(Level::decode_auto(&mut buf).is_err(), "32 is not a Level");
 }
 
 // ---- `#[binary(union)]` ----
@@ -376,21 +376,21 @@ enum Msg {
 }
 
 /// A union used as a named-object member: the member value goes through
-/// `encode_with_prefix`, i.e. the `write_prefixed` path over the raw form.
+/// `encode_with_prefix`, i.e. the `append_with_length_prefix` path over the raw form.
 #[derive(Debug, PartialEq, Encode, Decode)]
 struct Wrapped {
     shape: Shape,
 }
 
 fn encode_raw<T: Encode>(v: &T) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode(&mut e).unwrap();
     e.finish().unwrap()
 }
 
 fn decode_raw<T: for<'de> Decode<'de>>(bytes: &[u8]) -> T {
-    let mut d = Decoder::new(bytes);
-    T::decode(&mut d).unwrap()
+    let buf = bytes;
+    T::decode(buf).unwrap()
 }
 
 #[test]
@@ -472,16 +472,16 @@ fn test_union_in_vec() {
 #[test]
 fn test_union_invalid_tag() {
     // 7 is not a declared variant: decoding must fail instead of aliasing.
-    let mut d = Decoder::new(&[0x07]);
+    let mut buf: &[u8] = &[0x07];
     assert_eq!(
-        Shape::decode_auto(&mut d).unwrap_err(),
-        binary::Error::InvalidTag(7)
+        Shape::decode_auto(&mut buf).unwrap_err().to_string(),
+        "invalid union tag: 7"
     );
 
-    let mut d = Decoder::new(&[0x07]);
+    let buf: &[u8] = &[0x07];
     assert_eq!(
-        Shape::decode(&mut d).unwrap_err(),
-        binary::Error::InvalidTag(7)
+        Shape::decode(buf).unwrap_err().to_string(),
+        "invalid union tag: 7"
     );
 }
 
@@ -670,13 +670,13 @@ fn test_with_member_matches_repr_wire() {
 #[test]
 fn test_with_converter_error_is_not_a_wire_error() {
     // `-1` is a perfectly valid `i64` payload; only the converter rejects it.
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     write_named_member(&mut e, b"Elapsed", &-1i64).unwrap();
     let bytes = e.finish().unwrap();
 
-    let mut d = Decoder::new(&bytes);
+    let buf = &bytes;
     assert_eq!(
-        Timer::decode(&mut d).unwrap_err().to_string(),
+        Timer::decode(buf).unwrap_err().to_string(),
         "negative elapsed"
     );
 }
@@ -759,13 +759,13 @@ fn test_with_member_in_tuple_with_variable_repr() {
 
 #[test]
 fn test_with_converter_rejects_malformed_payload() {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     ("0af".to_string(), 1i32).encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
 
-    let mut d = Decoder::new(&bytes);
+    let mut buf: &[u8] = &bytes;
     assert_eq!(
-        Tagged::decode_auto(&mut d).unwrap_err().to_string(),
+        Tagged::decode_auto(&mut buf).unwrap_err().to_string(),
         "odd hex length"
     );
 }
@@ -792,6 +792,6 @@ fn test_phantom_data_field_is_skipped() {
     assert_eq!(bytes, [5, 2, b'i', b'd', 1, 7]);
     // Decoded through the decoder directly: `decode_auto` above requires
     // `for<'de>`, which a lifetime-carrying type does not satisfy.
-    let mut d = Decoder::new(&bytes);
-    assert_eq!(BorrowedView::decode_auto(&mut d).unwrap(), value);
+    let mut buf: &[u8] = &bytes;
+    assert_eq!(BorrowedView::decode_auto(&mut buf).unwrap(), value);
 }

@@ -8,9 +8,8 @@
 //! nothing outside this crate reaches them: a type that does not override them
 //! stays on the per-element loop. See `DESIGN.md` §19.16.
 
+use crate::allocator::Allocator;
 use crate::codec::{Decode, Encode};
-use crate::decoder::Decoder;
-use crate::encoder::Encoder;
 use crate::error::{Error, Result};
 
 use alloc::vec::Vec;
@@ -27,7 +26,7 @@ use core::mem;
 /// 3. the raw encoding of every value is exactly its bytes in the target's
 ///    native order (so a multi-byte type requires a little-endian target).
 #[inline]
-pub(crate) unsafe fn write_bulk<T: Encode>(items: &[T], e: &mut Encoder<'_>) -> Result<()> {
+pub(crate) unsafe fn write_bulk<T: Encode>(items: &[T], e: &mut Allocator<'_>) -> Result<()> {
     debug_assert_eq!(
         mem::size_of::<T>(),
         T::LEN,
@@ -41,7 +40,7 @@ pub(crate) unsafe fn write_bulk<T: Encode>(items: &[T], e: &mut Encoder<'_>) -> 
     // slice is one run of initialized payload bytes; `byte_len` was checked
     // against overflow just above.
     let bytes = unsafe { core::slice::from_raw_parts(items.as_ptr().cast::<u8>(), byte_len) };
-    e.write(bytes)
+    e.append(bytes)
 }
 
 /// Adopt `count` values out of `count * T::LEN` wire bytes without running
@@ -56,7 +55,7 @@ pub(crate) unsafe fn write_bulk<T: Encode>(items: &[T], e: &mut Encoder<'_>) -> 
 /// 5. `T` owns nothing: no `Drop`, no references, no lifetime tied to `'de`.
 #[inline]
 pub(crate) unsafe fn read_bulk<'de, T: Decode<'de>>(
-    d: &mut Decoder<'de>,
+    payload: &'de [u8],
     count: usize,
 ) -> Result<Vec<T>> {
     debug_assert_eq!(
@@ -66,7 +65,10 @@ pub(crate) unsafe fn read_bulk<'de, T: Decode<'de>>(
     );
     debug_assert!(!mem::needs_drop::<T>(), "bulk read of an owning type");
     let byte_len = count.checked_mul(T::LEN).ok_or(Error::LengthTooLarge)?;
-    let src = d.take(byte_len)?;
+    if payload.len() < byte_len {
+        return Err(Error::NotEnoughBytes);
+    }
+    let src = &payload[..byte_len];
     let mut values: Vec<T> = Vec::with_capacity(count);
     // SAFETY: the caller promises no padding, matching `size_of`, native byte
     // order equal to the wire order, every bit pattern valid, and no ownership.

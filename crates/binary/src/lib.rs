@@ -5,11 +5,11 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+mod allocator;
 mod codec;
 mod collections;
 mod container;
-mod decoder;
-mod encoder;
+mod converter;
 mod error;
 mod hex;
 mod length;
@@ -20,10 +20,10 @@ mod pod;
 mod primitives;
 mod smart_ptr;
 
+pub use allocator::Allocator;
 pub use codec::{Decode, Encode, Layout};
-pub use decoder::Decoder;
-pub use encoder::Encoder;
-pub use error::{ErasedError, Error, Result};
+pub use converter::{decode, decode_with_length_prefix, encode, encode_with_length_prefix};
+pub use error::{Error, Result};
 pub use length::{decode_prefix, encode_prefix, encode_prefix_wide, prefix_header_len};
 pub use named::{read_named_member, write_named_member, NamedMembers};
 pub use oneshot::{from_slice, to_vec};

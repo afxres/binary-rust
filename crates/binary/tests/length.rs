@@ -45,7 +45,7 @@ fn test_encode_multi_byte() {
 }
 
 /// `encode_prefix_wide` keeps the 4-byte width even for short lengths — the
-/// `write_prefixed` path relies on it, otherwise three stale zero bytes stay in front of
+/// `append_with_length_prefix` path relies on it, otherwise three stale zero bytes stay in front of
 /// the payload.
 #[test]
 fn test_encode_wide_for_short_length() {

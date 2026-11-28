@@ -3,6 +3,10 @@
 目标：与 `Mikodev.Binary`(C#) / `binary-cxx`(C++) 共享同一套 wire 格式，但用 Rust 的方式重新组织。
 仓库从孤儿分支起步，没有需要兼容的旧实现。
 
+本文只写**当前**设计与决策本身：设计章节用现在时陈述「是什么」与「为什么」，不记录改动过程，
+也不保留被推翻的写法与废弃接口——需要时从 git 历史取，提交信息即当时的上下文。唯一例外是
+§19：那里存的是实测数字，日期和「当时的猜测 / 订正」是这些数字的出处，不能靠重算补回来。
+
 ---
 
 ## 0. 结论
@@ -12,20 +16,19 @@
 2. **三个 trait**：`Layout`（类型级定长信息）、`Encode`、`Decode<'de>`。
 3. **`Decode` 第一天就带生命周期** `'de`，哪怕 v1 只返回 owned 类型。事后补生命周期是破坏性改动。
 4. **长度预测只在 converter 内部、且只用 O(1) 信息**。不暴露长度查询接口，也不递归遍历值树
-   （§10 已实施）：定长类型用 `LEN` 常量，简单变长类型用 `len()`，其余一律 anchor 兜底。
+   （§10）：定长类型用 `LEN` 常量，简单变长类型用 `len()`，其余一律 anchor 兜底。
    压缩（1 字节 vs 4 字节）只为了节省空间；**但压缩阈值必须与 C#/C++ 相同**：
    anchor 路径只在 `actual <= 16` 时压缩（§12 实测），不做通用 compact——这既是字节对齐，
    也避免 `FinishAnchor` 的 `memmove`。
-5. **编码器是单一具体类型** `Encoder<'a>`（内部 Owned/Borrowed 两种后端），不用泛型 `Sink`——
-   否则 `Encode` 失去 object safety，动态层没法做，而且单态化会把编译时间打爆。**缓冲容量由
-   调用方在构造期给上界**（`with_capacity` / `on_slice`），库不做增长启发式：估算要连前缀一起
-   算，少算 1 字节比不估更慢（§19.15.15）。
-6. 错误用具体 `Error` enum，默认不装箱；core crate 做成 `no_std + alloc`。
-   自定义类型自己的错误类型**不能穿透 trait**，只能在边界降级，且降级方式要显式选：
-   `Error::message`（只留消息）/ `Error::message_static`（零分配）/ `Error::wrapped`
-   （保留类型与 chain，付一次 `Arc` + 文本相等）（§18）。**整体擦除成 `dyn Error`** 的候选已
-   评估：benchmark 证明代价可忽略（§19.3），结论仍按可观测性保留枚举（§18.8.7）。
-   兼容性改由 **`#[non_exhaustive]`** 买单（§18.8.5）：加变体是 minor，改名与删除仍是 breaking。
+5. **写侧是单一具体类型** `Allocator<'a>`（内部 Owned/Borrowed 两种后端），不用泛型 `Sink`——
+   单态化会把编译时间打爆，而 `Encode` 本来也不是 dyn-compatible（§7）。**缓冲容量由调用方在
+   构造期给上界**（`with_capacity` / `on_slice`），库不做增长启发式：估算要连前缀一起算，少算
+   1 字节比不估更慢（§19.15.15）。读侧没有类型：游标就是 `&mut &[u8]`（§4.2）。
+6. 错误是五个变体的闭合 enum：三个类型无关的守卫（`BufferFull` / `NotEnoughBytes` /
+   `LengthTooLarge`）加两条降级通道（`Message` 文本 / `Wrapped` 保留类型）（§18）。自定义类型
+   自己的错误类型**不能穿透 trait**，只能在边界显式降级。变体集合按政策封闭，不加
+   `#[non_exhaustive]`：具体错误永远走两条通道，`match` 保持穷尽（§18.6）。core crate 做成
+   `no_std + alloc`。
 7. **「对齐」的验收标准是 fixture 字节断言，不是「应该能互解」**：从 C#/C++ 导出真实 wire
    存成语料，Rust 侧逐字节断言（§12）。现在是一份三仓共享的 `wire.tsv`（122 条，`langs`
    列声明每个实现必须断言哪些行，其中 74 条含 `rs`），外加 F# 的 5 条 union 语料（§12.5）。
@@ -40,7 +43,7 @@
 |:---|:---|
 |长度前缀|`len <= 127` → 1 字节（高位 0）；否则 4 字节大端，最高位（bit 31）置 1 标记，剩余 31 位存长度；范围 `0 ~ i32::MAX`|
 |前缀宽度（exact 路径）|宽度由**预测长度**决定（`<=127` → 1，否则 4），写入实际长度但**不改宽度**|
-|前缀宽度（`write_prefixed` 路径）|先占 4 字节；`actual <= 16` 且尾部余量够 `(-actual) & 7` 字节时压缩为 1 字节，否则**保留 4 字节**（§2、§12）|
+|前缀宽度（`append_with_length_prefix` 路径）|先占 4 字节；`actual <= 16` 且尾部余量够 `(-actual) & 7` 字节时压缩为 1 字节，否则**保留 4 字节**（§2、§12）|
 |前缀宽度（C# string，已知例外）|C# 用上界 `3 * chars + 3` 定宽度 → ≥42 字符的 ASCII 串是 4 字节头；Rust 与 C++ 用精确字节数（§12.3）|
 |定长类型|原样写出，默认小端|
 |变长类型|长度前缀 + payload|
@@ -62,14 +65,13 @@
 不变。代价是**不能改已存在成员的语义**：要改只能新增成员、在应用层同时接受新旧两个。这与
 C#/C++ 的做法一致，也是三边能互解的前提。
 
-这条原则也约束文档示例：`Error` 的示例错误一度叫 `TooNew`（"unsupported version 9"），那是
-把「版本号协商」这个本库**没有**的机制写进了样板，已于 2026-11-07 全部换成与版本无关的领域
-约束（`OutOfRange`：计数越界），并同步到 `tests/errors.rs`（`Dense { count, payload }`）。
+这条原则也约束文档示例：`Error` 的示例用与版本无关的领域约束（`OutOfRange`：计数越界），
+名字里不出现「版本号协商」——本库**没有**这个机制，写进样例也会被读成契约。
+对应 `tests/errors.rs` 的 `Dense { count, payload }`。
 示例是用户读到的第一份契约，措辞比内部命名更容易误导。
 
-要分清两件事：`TooNew` / `Versioned` 作为**示例**不恰当（它们描述的是本库不做的机制），
-但 `#[non_exhaustive]` 本身与版本无关、也不因此失效——它管的是错误 **enum 的变体集合**能否
-在不 breaking 的前提下增长（§18.8.5），不是 wire 的向前兼容（那是上面两条结构性质）。
+要分清两件事：`TooNew` / `Versioned` 作为**示例**不恰当（它们描述的是本库不做的机制）；
+错误 enum 的变体集合则按政策封闭（§18.6），与 wire 的向前兼容无关。
 
 ---
 
@@ -116,12 +118,12 @@ C#/C++ 的做法一致，也是三边能互解的前提。
 
 |条件|路径|长度来源|对应 C#|
 |:---|:---|:---|:---|
-|`LEN = n > 0`|`write_prefixed_bounded(n)`|类型常量，O(1) 精确|`EncodeWithLengthPrefixConstant`|
-|`LEN = 0` + override（`String` / `[u8]` / 定长元素集合）|`write_prefixed_bounded(len)`|`self.len()` 等，O(1) 精确|`StringConverter` override|
-|`LEN = 0` + 默认（变长集合 / named object）|`write_prefixed`|兜底，不预测|`EncodeWithLengthPrefixVariable`|
+|`LEN = n > 0`|`append_with_length_prefix_bounded(n)`|类型常量，O(1) 精确|`EncodeWithLengthPrefixConstant`|
+|`LEN = 0` + override（`String` / `[u8]` / 定长元素集合）|`append_with_length_prefix_bounded(len)`|`self.len()` 等，O(1) 精确|`StringConverter` override|
+|`LEN = 0` + 默认（变长集合 / named object）|`append_with_length_prefix`|兜底，不预测|`EncodeWithLengthPrefixVariable`|
 |**tuple / `Option` 的 `encode_auto`（任意 `LEN`）**|**成员逐个 auto，无自身前缀**|无需预测|`TupleObjectConverter.EncodeAuto` / `NullableConverter.EncodeAuto`|
 
-### 主路径：write_prefixed_bounded（O(1) 估计）
+### 主路径：append_with_length_prefix_bounded（O(1) 估计）
 
 按 `max_len` 定头宽度（`prefix_header_len`）并**只预留头**，`f` 直接往同一个 encoder 里写
 （可以少于估计值），写完用 `pos` 差算出实际字节数回填进头，头宽度不变 → 零 memmove
@@ -130,20 +132,20 @@ C#/C++ 的做法一致，也是三边能互解的前提。
 只预留头、不预留 `h + max_len`，是刻意的：预留上界会把上界成本压给两端——owned 后端要为零填充
 多扩一截，借用后端则会把「其实写得下」的调用报成 `BufferFull`。代价是越界检测挪到写完之后
 （`actual > max_len` 判成调用方 bug，报 `Message` 且视为终止，不回滚），也因此不需要 C# 那种
-把写入限制在窗口里的子 encoder。
+把写入限制在窗口里的子 allocator。
 
 与旧的 `precise_prefix` 唯一差别：旧的**要求 `f` 精确写满 n**，所以必须先递归算出 n；
 新的只要给个上界。Rust 的 `String::len()` 等本来就是精确值，wire 与重构前一致。
 
-### 兜底路径：`write_prefixed` 回填
+### 兜底路径：`append_with_length_prefix` 回填
 
-> **术语（2026-11-08 改名）**：Rust 侧两条前缀写入原语现为
-> `Encoder::write_prefixed_bounded(max_len, f)`（调用方给长度上界、头宽事前定死）与
-> `Encoder::write_prefixed(f)`（无上界、写完实测长度再决定压缩）。下文历史章节里的
-> 「anchor 路径 / anchor 兜底 / 默认 anchor」一律指后者；`FinishAnchor`、
-> `Allocator::anchor`、`AllocatorAnchorShrinkLimits` 是 C#/C++ 的公开成员，保留原名。
+> **术语**：Rust 侧两条前缀写入原语是
+> `Allocator::append_with_length_prefix_bounded(max_len, f)`（调用方给长度上界、头宽事前定死）与
+> `Allocator::append_with_length_prefix(f)`（无上界、写完实测长度再决定压缩）。下文「anchor 路径 /
+> anchor 兜底 / 默认 anchor」一律指后者；`FinishAnchor`、`Allocator::anchor`、
+> `AllocatorAnchorShrinkLimits` 是 C#/C++ 的公开成员，保留原名。
 > 两条路径的 **wire 并不等价**：前者按 `max_len` 定头宽后不再改变，后者按
-> `actual <= 16` 压缩，所以不可互换 —— 改名正是为了让这个区别落在名字上。
+> `actual <= 16` 压缩，所以不可互换 —— 名字本身就带着这个区别。
 
 给不出 O(1) 估计时，先占位 4 字节（最大可能），写完 payload 后**只做一次判断**决定是否压缩，
 判据与 C# `Allocator.FinishAnchor` / C++ `Allocator::FinishAnchor` 同形：`actual <= 16`
@@ -173,14 +175,13 @@ C#/C++ 的做法一致，也是三边能互解的前提。
 `Borrowed` 后端由调用方的 buffer 余量决定。**实际序列化应提前分配足够长的 buffer、
 尽量避免 realloc**，这样常态走压缩快路径，补零也不会触发扩容。
 
-> **状态（2026-11-08 已实施）**：`Encoder::write_prefixed` 已按 16 阈值 + 定长 `u64` 搬移
-> 改写。历史版本用运行时长度 `copy_within`，会退化成通用 `memmove` 调用（§19.15.7）；
-> §12.4 记录阈值决策与 `encode_prefix_wide` 的隐藏 bug。
+> 压缩时的搬移是两次定长 `u64` 拷贝，不是运行时长度的 `copy_within`——后者会退化成通用
+> `memmove` 调用（§19.15.7）。阈值与宽头的写法见 §12.4。
 
 ### 设计决策
 
 - **不需要 `PrefixPolicy` 枚举**。Rust 统一一套规则（`<=127` → 1 字节，否则 4 字节），
-  `write_prefixed_bounded` / `write_prefixed` 共用；差别只在宽度由谁决定（预测值 vs 16 阈值）。
+  `append_with_length_prefix_bounded` / `append_with_length_prefix` 共用；差别只在宽度由谁决定（预测值 vs 16 阈值）。
 - **不暴露长度查询接口**。`payload_len()` / `auto_len()` / `named_len()` 已删除（§10），
   派生宏与自定义类型只需实现 `encode`。
 - **anchor 阈值对齐 C#/C++（16），不做通用 compact**。理由是双重的：
@@ -206,48 +207,33 @@ pub trait Layout {
 
 pub trait Encode: Layout {
     /// 只写 raw payload，绝不写前缀
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()>;
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()>;
 
     /// 无条件写 prefix + payload；默认按 LEN 分流，可被 O(1) 长度的类型覆盖
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match Self::LEN {
-            0 => e.write_prefixed(|e| self.encode(e)),
-            n => e.write_prefixed_bounded(n, |e| self.encode(e)),
+            0 => e.append_with_length_prefix(|e| self.encode(e)),
+            n => e.append_with_length_prefix_bounded(n, |e| self.encode(e)),
         }
     }
 
     /// auto 位置：定长 raw、变长带前缀；tuple 覆盖为成员级平铺
-    fn encode_auto(&self, e: &mut Encoder<'_>) -> Result<()> {
-        match Self::LEN {
-            0 => self.encode_with_prefix(e),
-            _ => self.encode(e),
-        }
-    }
+    fn encode_auto(&self, e: &mut Allocator<'_>) -> Result<()> { /* 按 LEN 分流 */ }
 
     /// 内部钩子（`#[doc(hidden)]`）：容器把整段 payload 交给元素；默认逐元素循环。
     /// 只有本 crate 的定宽标量覆盖它做整块写，外部类型因此永远不在整块路径上（§19.16）
-    fn encode_slice(items: &[Self], e: &mut Encoder<'_>) -> Result<()>
-    where
-        Self: Sized,
-    { /* 默认实现：逐元素 encode_auto */ }
+    fn encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()>;
 }
 
 pub trait Decode<'de>: Layout + Sized {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self>;
+    /// 只解 raw payload；切片恰好是「属于这个值的字节」
+    fn decode(payload: &'de [u8]) -> Result<Self>;
 
-    /// auto 位置：tuple 覆盖为「所有成员 decode_auto」
-    fn decode_auto(d: &mut Decoder<'de>) -> Result<Self> {
-        match Self::LEN {
-            0 => d.with_prefix(|d| Self::decode(d)),
-            _ => Self::decode(d),
-        }
-    }
+    /// auto 位置：定长切出 LEN 字节，变长先读前缀再切；tuple / Option 覆盖
+    fn decode_auto(buf: &mut &'de [u8]) -> Result<Self> { /* 按 LEN 分流 */ }
 
     /// 内部钩子（`#[doc(hidden)]`）：与 `encode_slice` 对称，默认逐元素 `decode`（§19.16）
-    fn decode_slice(d: &mut Decoder<'de>, count: usize) -> Result<Vec<Self>>
-    where
-        Self: Sized,
-    { /* 默认实现：逐元素 decode */ }
+    fn decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>>;
 }
 ```
 
@@ -259,7 +245,7 @@ pub trait Decode<'de>: Layout + Sized {
 |`Encode`|`Encode::encode`|
 |`EncodeAuto`|`Encode::encode_auto`（有默认实现，**tuple 必须 override**）|
 |`EncodeWithLengthPrefix`|`Encode::encode_with_prefix`（可 override）|
-|`Decode` / `DecodeAuto` / `DecodeWithLengthPrefix`|`Decode::decode` / `Decode::decode_auto` / `Decoder::with_prefix`|
+|`Decode` / `DecodeAuto` / `DecodeWithLengthPrefix`|`Decode::decode` / `Decode::decode_auto` / `decode_with_length_prefix`|
 
 `EncodeAuto` 在绝大多数类型上不需要单独实现（默认按 `LEN` 分流），
 但 **tuple 必须 override**：C# `ContextMethodsOfTupleObject::GetEncodeDelegateAsTupleObject`
@@ -280,14 +266,13 @@ Rust 用 trait 关联常量表达，并且**照抄同一个哨兵**：
 |定长|`n > 0`|`n > 0`|
 |单位|raw payload 字节数，**不含前缀**|同左|
 
-2026-11-07 之前这里写的是 `Option<usize>`（`None` = 变长），理由是把判别式显式化。
-改成裸 `usize` 是因为那条理由被两条更硬的理由推翻了：
+用裸 `usize` 而不是 `Option<usize>`（`None` = 变长），后者会把判别式显式化，
+但有两条更硬的理由不用它：
 
 1. **`Some(0)` 不是理论上的空洞，是能跑出来的。** `[T; 0]` 走 `array_len::<T, 0>()`
-   必然得到 `Some(0)`——恰好是 trait 文档里标成 invalid 的那个值。`encode_auto` 的
-   `debug_assert!(n > 0)` 在 debug 构建直接 panic（已实测）；release 下更糟：0 字节不带前缀，
-   `Vec<[i32; 0]>` 的元素个数彻底丢失。换成 `usize` 后这个状态不存在，`[T; 0]` 自然退化为
-   `0`，`debug_assert` 也一并删掉——不是更好防，而是不用防。
+   必然得到 `Some(0)`——恰好是 trait 文档里标成 invalid 的那个值。0 字节若不带前缀，
+   `Vec<[i32; 0]>` 的元素个数就彻底丢失。裸 `usize` 让这个状态不存在，`[T; 0]` 自然退化为
+   `0`，不需要检查。
 2. **三边共用同一个哨兵，少一层翻译。** 读 C#/C++ 的 `if (length != 0)` 和读 Rust 的
    `match LEN { 0 => …, n => … }` 是同一件事；`None` 只是多做一次映射，没有多表达信息。
 
@@ -344,50 +329,46 @@ type`），source generator 报 `BINSRCGEN13`「Type Not Recognized」诊断。R
 平铺 override。因为 `encode_auto` 是统一入口，tuple 的 override 在嵌套每一层自动生效，
 容器无需配合。
 
-`Decoder::with_prefix` 读前缀后会构造一个 `buf` 恰好等于 payload 长度的子 decoder，
-所以 `decode` 里读 "全部剩余字节" 就是精确边界：
+`decode_auto` 的变长分支先读前缀，再把「恰好等于声明长度」的载荷交给 `decode`，
+所以 `decode` 看到的切片就是精确边界，不必也不该再读前缀：
 
 ```rust
 impl<'de> Decode<'de> for String {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        let bytes = d.take(d.remaining())?;   // 不是 read_prefix()
-        String::from_utf8(bytes.to_vec()).map_err(|_| Error::message_static("invalid UTF-8"))
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        String::from_utf8(payload.to_vec()).map_err(|_| Error::message_static("invalid UTF-8"))
     }
 }
 ```
 
-首版实现里 `String` / `Vec<T>` / `&str` / `&[u8]` 的 `decode` 误调了 `read_prefix()`，
-等于读了两次前缀：5 字节 payload `[1,2,3,4,5]` 被解成 `[2]`，1000 字节字符串被截断。
-11 个测试同时失败且症状一致，定位后统一改为 `take(remaining())`。**这条边界不要再用错。**
+**这条边界不要再用错**：在 `decode` 里再读一次前缀，会把 payload 的头几个字节当成前缀
+（5 字节 payload 解成 2 字节、1000 字节字符串被截断），症状与真实短读一模一样。
 
-`read_prefix()` 是公开 API（对应 C# `DecodeWithLengthPrefix`），供手动构造 wire 之类的场景使用，标准类型的 `decode` 实现不应该调用它。
+`decode_with_length_prefix` 是公开 API（对应 C# `DecodeWithLengthPrefix`），供手动构造 wire
+的场景使用；标准类型的 `decode` 不调用它。
 
 ---
 
-## 4. Encoder / Decoder
+## 4. Allocator、读侧游标与 converter 自由函数
 
-两边的结构是一一对应的，Rust 侧没有引入新概念：
+写侧有类型，读侧没有类型——这是三边结构里唯一不一一对应的位置：
 
 |角色|C#|C++|Rust|
 |:---|:---|:---|:---|
-|写缓冲 + 锚点回填|`Allocator`（默认自增长；传入 `Span<byte>` 则先写调用方内存）|`Allocator`（默认自增长；传入 `std::span<std::byte>` 同上）|`Encoder<'a>`（`Backing::Owned` / `Borrowed`）|
-|可推进的读切片|`ref ReadOnlySpan<byte>`|`std::span<const std::byte>&`|`Decoder<'de>`|
-|取视图|`Allocator.AsSpan()`|`Allocator::AsSpan()`|`Encoder::as_bytes()`|
-|物化结果（自有）|`Allocator.ToArray()`（拷一份 `byte[]`）|`Allocator::Invoke<std::vector<std::byte>>(action)`（静态模板，内部建 `Allocator`）|`Encoder::finish() -> Result<Vec<u8>>`|
+|写缓冲 + 锚点回填|`Allocator`|`Allocator`|`Allocator<'a>`|
+|可推进的读切片|`ref ReadOnlySpan<byte>`|`std::span<const std::byte>&`|`&mut &'de [u8]`|
+|取视图|`Allocator.AsSpan()`|`Allocator::AsSpan()`|`Allocator::as_bytes()`|
+|物化（自有）|`Allocator.ToArray()`|`Allocator::Invoke<T>(action)`|`Allocator::finish()`|
+|紧凑整数 / 前缀的自由函数|`Converter.Encode` / `Decode` / `*WithLengthPrefix`|`binary::Encode` / `Decode` / `*WithLengthPrefix`|`converter::{encode, decode, encode_with_length_prefix, decode_with_length_prefix}`|
 
-「物化」两边形状不同，这一行最容易记错：C# 与 Rust 是对**已有** allocator 取值（`ToArray()` 复制出
-`byte[]`、`finish()` 交出 `Vec`），而 C++ 的 `Allocator` 没有 `Take()` / `ToArray()` 这类方法 ——
-只有 `AsSpan()` 取视图（README 的编码示例就是 `const auto bytes = allocator.AsSpan();`，视图有效期
-跟着 allocator），要自有容器只能走静态模板 `Allocator::Invoke<T>(action)`：内部构造 `Allocator`、
-跑完 action 后按 `allocator.Length()` `resize` 容器再返回，`T` 默认 `std::vector<std::byte>`
-（要求元素 1 字节、可平凡复制，容器有 `data()` / `resize()`）。C# 侧的一次性版本是
-`Allocator.Invoke<T>(data, action)`（内部用池化 allocator，末尾 `ToArray()`）；C++ 的
-`binary::experimental::Encode(item)` 则封装了上面那条 `Invoke` 路径。
+物化一行两边形状不同：C# 与 Rust 对**已有的** allocator 取值（`ToArray()` 复制出 `byte[]`，
+`finish()` 交出 `Vec`），C++ 的 `Allocator` 只有 `AsSpan()`（视图的有效期跟着 allocator），
+要自有容器走静态模板 `Allocator::Invoke<T>(action)`；C# 的一次性版本是
+`Allocator.Invoke<T>(data, action)`。
 
-### Encoder
+### 4.1 Allocator
 
 ```rust
-pub struct Encoder<'a> { inner: Inner<'a>, pos: usize }
+pub struct Allocator<'a> { inner: Inner<'a>, pos: usize }
 
 enum Inner<'a> {
     Owned(Vec<u8>),          // 自增长，对应 C# Allocator 默认构造
@@ -395,174 +376,59 @@ enum Inner<'a> {
 }
 ```
 
-单类型 + 内部枚举，而不是 `Encoder<S: Sink>` 泛型：
+单类型 + 内部枚举，而不是 `Allocator<S: Sink>` 泛型：它出现在每个 `Encode` / `Decode` 签名
+里，类型参数会传染所有 impl 并成倍放大单态化；增长是冷路径，一次 Owned/Borrowed 分支的代价
+已实测（§19.8、§19.15）。
 
-- `Encoder<'a>` 出现在每个 `Encode` / `Decode` 签名里，加 `S: Sink` 参数会把类型参数传染给
-  所有 impl 并成倍放大单态化；而且「`Encode` 要能 `dyn`」这条路本来就不通（`Layout::LEN`
-  让 `Encode` 不是 dyn-compatible，见 §7），没有为它保留泛型的理由；
-- 泛型会把整条编码路径单态化 N 份，Rust 编译时间代价很实在；
-- 增长是冷路径，一次分支可以接受（C# 的 `Ensure` 也是每次判断）。
+|方法|作用|
+|:---|:---|
+|`new` / `with_capacity(n)` / `on_slice(&mut [u8])`|三种后端；容量预算是调用方给的上界，不是承诺|
+|`append` / `append_byte`|裸字节|
+|`append_with_length_prefix(f)`|前缀 + 载荷：占 4 字节 anchor，写完按 16 阈值决定压缩还是保留宽头（§2、§12）|
+|`append_with_length_prefix_bounded(max_len, f)`|长度上界已知：头宽事前定死，`f` 直接写本 allocator，事后按实际长度回填|
+|`len` / `as_bytes` / `finish`|已写字节数 / 视图 / 交出 `Vec`（借用后端没有 `finish`）|
 
-关键 API：
+`append_prefixed_bytes` 是 `pub(crate)` 快路径：长度已知时一次预留前缀 + 载荷，成员名与
+`str` / `[u8]` 用它（§19.15.11）。不导出的理由与 `PREFIX_SHRINK_LIMIT` 相同：它是调优决定，
+不是 API 承诺。
 
-```rust
-impl<'a> Encoder<'a> {
-    pub fn new() -> Self;                       // Owned，容量种子 256
-    pub fn with_capacity(n: usize) -> Self;     // 容量预算 = 调用方给的上界（超出仍增长）
-    pub fn on_slice(buf: &'a mut [u8]) -> Self; // 借用，越界即 Err
+命名约定：改游标的操作一律动词开头（`append*`）；不动游标的访问器只有 `len` / `as_bytes`。
+`encode` 是自由函数而不是方法——它写的是 wire 上的紧凑整数，不是 allocator 的状态。
 
-    pub fn write(&mut self, src: &[u8]) -> Result<()>;
-    pub fn write_byte(&mut self, b: u8) -> Result<()>;
-    pub fn as_bytes(&self) -> &[u8];
-    pub fn len(&self) -> usize;                 // 已写字节数；借用后端只有它和 as_bytes
-    pub fn finish(self) -> Result<Vec<u8>>;
+**不提供复用**（决策）：`finish(self)` 吃掉 `Vec`；要复用就自己拿 `on_slice` 写进已分配的
+缓冲。因此没有 `clear` / `reset` / `take_bytes`，也没有 `Default`（唯一用途是 `mem::take`）。
 
-    /// 无条件 prefix + payload；按 O(1) 估计预留头，回填实际长度，零 memmove
-    pub fn write_prefixed_bounded(
-        &mut self,
-        max_len: usize,
-        f: impl FnOnce(&mut Encoder<'_>) -> Result<()>,
-    ) -> Result<()>;
+### 4.2 读侧：游标就是 `&mut &[u8]`
 
-    /// 兜底：占位 4 字节 → 写 payload → 仅在 actual <= 16 且尾部余量够时压缩
-    /// （两次定长 u64 搬移），否则保留 4 字节头（与 C# / C++ Allocator::FinishAnchor
-    /// 一致，见 §12）
-    pub fn write_prefixed(
-        &mut self,
-        f: impl FnOnce(&mut Encoder<'_>) -> Result<()>,
-    ) -> Result<()>;
+没有 decoder 类型。三个理由：
 
-}
-```
+1. **边界就是切片**。`LEN > 0` 的类型由框架切出恰好 `LEN` 字节再调
+   `Decode::decode(payload)`，与 C# `Decode(in span)` 同形；`LEN == 0` 的类型在 `auto` 位置
+   先读前缀，再把前缀声明的载荷交给 `decode`。`decode` 拿到的是「属于自己的字节」，impl
+   不必也不该再动游标。
+2. **位置不需要 API**。所有原语都是「成功才前进」：失败后 `总长 - buf.len()` 就是失败项起点。
+   C# / C++ 把 cursor 放在 span 里，同样只有 `total - remaining`。
+3. **零拷贝不受影响**。`&'de str` / `&'de [u8]` 的 `decode` 直接返回输入切片。
 
-编码侧**不再有 `with_prefix`**（旧的 `with_prefix(Option<usize>, f)` 精确路径已删除）；
-解码侧 `Decoder::with_prefix` 保留。`write_prefixed_bounded` 用 `Encoder::on_slice` 把写入限制在
-恰好 `max_len` 字节内，越界返回 `Error::BufferFull`，对应 C# `ThrowInvalidReturnValue`。
+### 4.3 converter 自由函数
 
-`Encoder` / `Decoder` 上没有任何协议层方法：位置派发在 `Encode` / `Decode` 上
-（`value.encode_auto(&mut e)`），成员读写是 `named.rs` 的两个自由函数，游标只认字节。
-`named` 移出与 `auto` 删除的经过见 §5。
+`crates/binary/src/converter.rs` 对应 C# `Converter.Static.cs` / C++ `ConverterExtensions.cpp`：
 
-**命名约定：改游标的一律动词开头。** 写侧 `write` / `write_byte` / `write_compact_int`，
-读侧 `take` / `take_byte` / `read_prefix` / `read_compact_int` / `peek_byte`；名词只剩
-`len` / `remaining` / `as_bytes` 三个**不动游标**的访问器。2026-11-09 把 `compact_int` 改成
-`write_compact_int` / `read_compact_int`，就是因为裸名词分不清「读一个属性」还是「推进游标」——
-`d.compact_int()` 与 `d.remaining()` 在调用点上长得一模一样，而前者会消费字节。
-
-#### 公开接口逐条审计（2026-11-07）
-
-判定标准只有两条：**有没有调用者**（整仓 grep，含测试与 bench）、**该不该由 `Encoder` 承担**。
-`pub` 的成本是永久承诺，为测试便利而导出不算理由（§12.4 的 `PREFIX_SHRINK_LIMIT` 同理）。
-
-|接口|调用者|结论|
+|函数|对齐|语义|
 |:---|:---|:---|
-|`new` / `with_capacity`|全部调用点 / 仅 `new()`|留：预分配是真实需求|
-|`on_slice`|`write_prefixed_bounded`、bench、测试|留：借用后端唯一入口|
-|`write` / `write_byte` / `write_compact_int`|容器、派生代码、`option`|留|
-|`auto` / `named`|派生代码、容器|**改**：`named` 移成自由函数（11-08）、`auto` 删除（11-09）——两者都不是游标操作，见 §5|
-|`write_prefixed_bounded` / `write_prefixed`|`codec.rs` 默认实现、容器|留：两条带前缀路径|
-|`finish` / `as_bytes`|全部调用点 / 2 处测试|留：`on_slice` 没有 `finish`，`as_bytes` 是它的唯一出口|
-|`len`|`errors.rs`、bench（借用后端）|留|
-|`position`|**0**|**删**：与 `len` 是同一个 `self.pos`|
-|`is_empty`|**0**|**删**：`len() == 0`，只为满足 clippy|
-|`impl Default`|**0**|**删**：唯一用途是 `mem::take` 复用缓冲，而「不复用」已定（见下），故 `new_without_default` 用 `#[allow]` 静音|
+|`encode(a, v: u32)`|`Converter.Encode(ref Allocator, int)` / `Encode(Allocator&, size_t)`|紧凑整数（union / variant tag）写进 allocator；1 或 4 字节；超过 `i32::MAX` 是 `LengthTooLarge` 且不写字节|
+|`decode(buf) -> u32`|`Converter.Decode(ref span)` / `Decode(span&)`|读紧凑整数并前进游标|
+|`encode_with_length_prefix(a, payload)`|`EncodeWithLengthPrefix`|前缀 + 已知字节，一次预留|
+|`decode_with_length_prefix(buf) -> &[u8]`|`DecodeWithLengthPrefix`|读前缀、切出载荷，游标前进到载荷之后|
 
-`len` 上加了 `#[allow(clippy::len_without_is_empty)]`：`Encoder` 不是容器，「还没写过东西」
-不值得一个谓词，为此再养一个访问器才是被 lint 牵着走。
+**不搬 span 变体**（C# `Encode(Span<byte>, int, out int bytesWritten)` /
+`Decode(ReadOnlySpan<byte>, out int bytesRead)`，C++ 同形）：同一个能力在 Rust 里各有等价
+写法——写侧 `length::encode_prefix(buf, len)`（返回 1 或 4），或 `Allocator::on_slice(buf)` +
+`encode` + `len()`；读侧复制游标再 `decode`（`bytes_read = buf.len() - probe.len()`）。两者都
+是一两行，不值得再开两个公共名字；`&mut &[u8]` 与 `&[u8]` 的区别本身就表达了「消费 / 不
+消费」，`out` 参数在 Rust 的落法就是返回值。
 
-`Decoder` 侧做过同样的清点，结论更狠——**`len` / `is_empty` / `position` 三个全删**，只留
-`remaining()`。`len`/`is_empty` 报的是**输入缓冲**大小（借用模型的细节）；`position()` 是同一
-细节加个偏移，而且它**本身不自洽**：交给 `Decode` impl 的 decoder 是 scoped 的、从 0 开始，
-所以同一个名字在顶层是绝对值、在嵌套里是作用域相对值。能解释绝对值的人必然持有原始 buffer
-（`Decoder::new(&buf)`），一行 `buf.len() - d.remaining()` 就还原；不能解释的人只想要相对距离
-（`start - d.remaining()`）。C# 和 C++ 根本没有 decoder 对象，把 cursor 放在 span 里
-（`ref ReadOnlySpan<byte>` / `std::span`），"我在哪" 天生就是 `total - remaining`。
-`Decode` 的形状三边不同，差别不在「有没有 span」，而在**消费量是否可观测**：
-
-||子解码入口|边界从哪来|解码器读了多少|
-|:---|:---|:---|:---|
-|C#|`Converter<T>::Decode(in ReadOnlySpan<byte>)`|参数自带的 `span.Length`|**不可观测**（`in`，不能再赋值推进）|
-|C++|`Converter<T>::Decode(std::span<const std::byte>)`|参数自带的 `span.size()`|**不可观测**（按值，推进只影响副本）|
-|Rust|`Decode::decode(&mut Decoder<'de>)`|`Decoder.buf`，由 `with_prefix` 收窄|`pos`，**可观测**|
-
-C# 与 C++ 的 `Decode` 是纯函数：进去一段字节、出来一个值，「读了几字节」对调用方不可见，
-所以报错只能说到「这段内容不对」。`DecodeWithLengthPrefix(ref span)` 两侧同名、同形——在
-调用方一侧完成「读前缀 → 推进父 span → 切出 payload → 交给 `Decode`」，作用域就是那个切片，
-不需要额外类型。
-
-Rust 侧 `&'de [u8]` 同样是 span（上一段已说明 `&mut &'de [u8]` 也写得出来），所以这不是
-语言能力差异。差别是选型：边界被编码进 `Decoder.buf`、游标跟着一起走，于是 `with_prefix`
-失败时能把子坐标折回父坐标（`self.pos = start + sub.pos`）——**这一行 C# / C++ 写不出来，
-它们没有可回写的游标**。可观测的代价就是那十几行作用域管理代码。
-
-反过来，Rust 的定长路径**不切边界**：C++ `DecodeAuto` 要 `span = span.subspan(length)` 再交给
-`Decode`，Rust 直接 `Self::decode(d)`，靠 `LEN` 契约自觉。`with_prefix` 只服务变长值——
-只有那里边界无从推导。
-
-
-**「不复用」是决策，不是遗漏**（2026-11-07）：allocator 与 C# `Allocator`、C++
-`Allocator(span)` 同形——一次性的轻量栈上对象，只追加不删除。`finish(self)` 吃掉 `Vec` 是
-刻意的；要复用就自己拿 `on_slice` 写进已分配的缓冲。因此不加 `clear()` / `reset()` /
-`take_bytes()`，`impl Default` 也随之失去最后一条理由。
-
-`write_compact_int` 的 `debug_assert!` 换成真检查：`v > i32::MAX` 时 `v | 0x8000_0000` 把 bit 31 当
-数据写出去，解码端又把这个 bit 掩掉，值会**静默改变**。现在返回 `Error::LengthTooLarge` 且
-不写任何字节（`test_compact_int_beyond_i32_max_is_rejected`）。
-
-`Encoder` / `Decoder` 都加了手写 `Debug`（`src/hex.rs` 提供 32 字节上限的十六进制预览）：
-`Encoder` 打 backend / capacity / len / bytes，`Decoder` 打 `buf_len` / `pos` / `remaining` /
-`next`。派生 `Debug` 会把 `Vec` 的保留尾巴一起倒出来，既是噪声又是错的（未初始化区不属于结果）。
-
-另加两个一次性辅助函数（`src/oneshot.rs`）：`to_vec(&T)` = `new + Encode::encode + finish`，
-`from_slice::<T>(&[u8])` = `Decode::decode` + **拒绝尾随字节**。**两者都是 raw 位置**：
-C# `GeneratorExtensions::Encode<T>` → `Converter<T>::Encode(item)`（`EncodeConstant` /
-`EncodeVariable` 都在新 allocator 上调 raw `Encode(ref allocator, item)`），
-`GeneratorExtensions::Decode<T>` → `Converter<T>::Decode(byte[])` → `Decode(in ReadOnlySpan<byte>)`，
-把整段交给 raw 解码；
-C++ `Converter<T>::Encode(Allocator&, item)` / `Converter<T>::Decode(span)` 同样是 raw，
-`EncodeAuto` / `DecodeAuto`（以及 Rust 的 `encode_auto` / `decode_auto`）只用于成员位置。
-顶层值独占整个 buffer，再加前缀既冗余、字节也与另外两边不同 —— 初版误用 `auto`，
-2026-11-08 按三边源码订正。变长类型的 raw 解码按定义读满整段，所以「尾随字节」只对
-定长类型可见；`from_slice` 要求整段消耗完，想从大缓冲里读一个值就用 `Decoder`
-（`remaining()` 在那里是可见的）。`tests/derive.rs:test_csharp_record_wire` 并列钉住了这
-条区别：C# `Generator.Encode` 是 17 字节 raw，`Converter<Person>::EncodeAuto` 才多出
-`80 00 00 11` 宽头。
-
-
-### Decoder
-
-```rust
-pub struct Decoder<'a> { buf: &'a [u8], pos: usize }
-
-impl<'a> Decoder<'a> {
-    pub fn take(&mut self, n: usize) -> Result<&'a [u8]>;
-    pub fn read_prefix(&mut self) -> Result<&'a [u8]>; // 读前缀并切出 payload
-    pub fn with_prefix<T>(&mut self, f: impl FnOnce(&mut Decoder<'a>) -> Result<T>) -> Result<T>;
-    pub fn remaining(&self) -> usize;
-}
-```
-
-`take` 返回 `&'a [u8]` 而不是绑定到 `&mut self` 的借用，这样零拷贝解码才能成立
-（`&'a str`、`&'a [u8]` 成员）。`remaining()` 是**唯一**的长度/位置查询：失败后它仍然有意义
-（`take` 失败不动游标，`with_prefix` 把子游标折回父坐标），拿 `buf.len() - remaining()` 就是
-失败字节的绝对偏移；而 `len`/`is_empty`/`position` 都不提供，理由见 §4 `Encoder` 段末尾。
-
-### `Decoder` 是必须的吗
-
-严格说不是：`fn decode(r: &mut &'de [u8]) -> Result<Self>` 一样能写，零拷贝也照样成立
-（`r.split_at(n)` 拿到的两段都还是 `&'de [u8]`）。它值得存在，是因为三件事：
-
-1. **它是唯一的扩展点**。以后要加长度预算、`&'de [T]` 的按元素宽度校验、解码值的来源校验，
-   只需要往 `Decoder` 上加字段和方法；换成 `&mut &'de [u8]`，加一个参数就是破坏所有 impl
-   的签名变更。这和 serde 要一个 `Deserializer` 对象、而不是裸 `&[u8]`，是同一个道理。
-2. **调用点更好读**。`d.take(4)` / `d.read_prefix()` / `d.read_compact_int()` 是方法调用，
-   `*r = &r[n..]` 是手工切片，在二十多个 impl 里会累积成噪声。
-3. **`with_prefix` / `read_prefix` 需要显式游标**，报错时才有位置可指。
-
-代价也是真的：`decoder.rs` 141 行，`Decoder<'de>` 出现在 6 个源文件与派生代码里，共 39 处
-引用。真要砍掉它是机械改动而非设计重构——但会失去第 1 条，所以当前保留。
-
----
+`take` / `take_byte` 是 `pub(crate)`：定长类型 `decode` 的机制，不是给调用方的工具。
 
 ## 5. derive 宏
 
@@ -615,10 +481,10 @@ struct Person {
   该例的声明序恰好等于 C# 的名字序（`"Id" < "Name"`），所以两边 hex 相同；顺序本身不是
   契约，只是 C# 为了输出稳定才排序（§19.4）。
 - 代价是**命名**：C# 属性 PascalCase、Rust 字段 snake_case，每个字段一行 `rename`；漏一个不会
-  在编译期报错，只会在解码侧变成 `MissingMember`。容器级 `#[binary(rename_all = "PascalCase")]`
+  在编译期报错，只会在解码侧变成「缺失必需成员」错误。容器级 `#[binary(rename_all = "PascalCase")]`
   （serde 同名属性）能把 n 行压成 1 行，**尚未实现**，见下面的实现状态表。
 
-### 实现状态（2026-11-07）
+### 派生宏现状
 
 `crates/binary-derive` 已实现第二版：**零依赖**（只用编译器给的 `proc_macro`，不引 `syn`/`quote`），
 自带 token 展平 + 递归下降解析，生成 `Layout`/`Encode`（`#[derive(Encode)]`）与
@@ -639,19 +505,17 @@ struct Person {
 
 已验证：`crates/binary-tests/tests/derive.rs` 的 25 个用例 + `fixtures/wire.tsv` 的
 6 条 derive 相关 fixture（named、tuple object ×2、enum ×2、`int?` 成员）。
-**2026-11-07 之前前 5 个用例没有接线**——测试入口文件缺 `mod derive;`，等于宏从未被编译过。
 
-已修（原「已知缺陷」1–3、5，详见 §14.3 / §15）：
+编译期约束（实现见 §14.3 / §15）：
 
-1. ~~结构体级属性被静默丢弃~~ → 现在解析并校验，未知选项直接 `compile_error`。
-2. ~~重复 wire name 无检查~~ → 解析期报
-   ``duplicate wire name "id" on field `b`; `a` already uses it``，caret 落在重复的字段上。
-   报错文案不再泄漏内部表示（以前是 `b"x"`）。
-3. ~~非 ASCII `rename` 生成非法字节串~~ → 反转义成字节后 `Literal::byte_string`。
-5. ~~错误 span 全部指向 derive 名~~ → token 现在携带 `Span`，`Error` 带定位：
-   字段级错误指向字段名、`#[binary(nope)]` 指向选项本身、`union` 指向关键字、
-   tuple struct 指向括号、空结构体指向花括号。两个 derive 各产出一条但 span 相同，
-   rustc 会去重，所以用户只看到一条。
+1. 结构体级属性必须解析并校验，未知选项直接 `compile_error`。
+2. 重复 wire name 在解析期报
+   ``duplicate wire name "id" on field `b`; `a` already uses it``，caret 落在重复的字段上，
+   文案不泄漏内部表示（不出现 `b"x"`）。
+3. 非 ASCII `rename` 反转义成字节后由 `Literal::byte_string` 生成，不产出非法字节串。
+4. 错误 span 指向出错的 token：字段级错误指向字段名、`#[binary(nope)]` 指向选项本身、
+   `union` 指向关键字、tuple struct 指向括号、空结构体指向花括号。两个 derive 各产出一条
+   但 span 相同，rustc 去重，用户只看到一条。
 
 仍然存在：
 
@@ -688,7 +552,7 @@ C# `ContextMethodsOfNamedObject` 调的是 `EncodeWithLengthPrefix`，
 C++ `NamedObjectConverter::EncodeInternal` 也是 `EncodeWithLengthPrefix`；
 即使 value 是 `i32` 这种定长类型也照样带前缀（与 tuple 的 `encode_auto` 平铺行为不同）。
 `prefix(name) + name` 与成员名一样是编译期常量，可以预计算成 `&'static [u8]`，
-编码时整块 `write`（C# 的 `headers[i]` 预计算就是这个思路）。
+编码时整块 `append`（C# 的 `headers[i]` 预计算就是这个思路）。
 
 解码（对应 C++ `NamedObjectLayout::Parse` / C# `NamedObjectDecoder.Invoke`）：
 
@@ -696,7 +560,7 @@ C++ `NamedObjectConverter::EncodeInternal` 也是 `EncodeWithLengthPrefix`；
 2. `find_member(name)` 查索引，未知名字直接 `continue`（前向兼容，跳过整个成员）。
 3. 已知但该槽位已填 → 重名报错。
 4. 记录 value 的 `(offset, length)` 到 slots 数组（C# 用 `long` 打包 `offset << 32 | length`）。
-5. 循环结束后遍历 slots：非 optional 且未出现 → `MissingMember` 报错。
+5. 循环结束后遍历 slots：非 optional 且未出现 → `missing required member: {name}` 报错。
 6. 最后按索引对每个 slot 调 `T::decode` —— **raw，不带前缀**，因为 value 前缀已在第 1 步消费。
    这与 §3「前缀归属」的边界一致，不要写成 `decode_auto`。
 
@@ -711,7 +575,7 @@ C++ `NamedObjectConverter::EncodeInternal` 也是 `EncodeWithLengthPrefix`；
 - 「所有成员定长则取 `sum`」只适用于 **tuple object**（成员拼接、除最后一个外 auto，
   最后一个 raw，无 name 无额外前缀），对应 C++ `TupleObjectMember::Length()` 的累加。
 
-### core 侧已落地的 API（2026-11-07）
+### core 侧提供的 API
 
 派生代码要写的东西现在由 core 直接提供，derive 宏只需生成调用：
 
@@ -721,15 +585,15 @@ C++ `NamedObjectConverter::EncodeInternal` 也是 `EncodeWithLengthPrefix`；
 |`write_named_member(e, name, value)`|写一个成员，直接调 `value.encode_with_prefix(e)`，**无条件前缀**；成员写入的**唯一**公开入口|
 |`read_named_member(d)`|读一个成员，返回 `(name, raw payload)`；值前缀在这里消费掉，`write_named_member` 的读侧对偶|
 |`NamedMembers::<N>::parse(d, find)`|循环 `read_named_member(d)`；未知跳过、重名报错、按索引记录 value 的 raw slice|
-|`NamedMembers::value(i, name)` / `optional(i)`|按索引 raw decode；缺失分别报 `MissingMember(name)` / 取 `Default`|
+|`NamedMembers::value(i, name)` / `optional(i)`|按索引 raw decode；缺失分别报 `missing required member: {name}` / 取 `Default`|
 
-成员读写是 `named.rs` 的两个自由函数，不在 `Encoder` / `Decoder` 上：成员不是游标操作，
+成员读写是 `named.rs` 的两个自由函数，不在 `Allocator` 上（读侧没有可以挂的类型）：成员不是游标操作，
 挂上去像是在给 `named object` 开特权（`Vec`、tuple 都没有对应方法）。名字也直说 `member`，
 不会被读成「读写整个对象」；半操作随之消失 —— 名字与值在同一个函数里连写，
 「有名字没值」表达不出来。
 
 对象层只有读侧有类型（`NamedMembers`），**这是格式决定的，不是写侧漏了**：写是流式的，
-一个 `Encoder` 连续写几个成员就是整个对象；读必须先缓冲全部成员才能按名取字段
+一个 `Allocator` 连续写几个成员就是整个对象；读必须先缓冲全部成员才能按名取字段
 （成员顺序不是 wire 契约），这份缓冲就是 `NamedMembers`。非对称因此只留在对象层，
 成员层由 `write_named_member` / `read_named_member` 这一对抹平。
 
@@ -743,33 +607,33 @@ named struct 的派生解码报 E0603（实测另有三处手写调用同样失�
 若只想收窄文档可见面，可给重导出加
 `#[doc(hidden)]`，但 semver 承诺不变。
 
-半操作不存在了：`write_named_member` 里 `write_prefixed_bytes(name)` 与 `encode_with_prefix`
+半操作不存在了：`write_named_member` 里 `append_prefixed_bytes(name)` 与 `encode_with_prefix`
 连着写，没有「只写名字」的公开或私有入口。生成代码目前不预计算名字头；若将来实测值得，
 再加 `write_named_member_precomputed(&'static [u8], &T)`，而不是拆出半操作。
 
 `named_len` 已随 §10 重构删除，派生宏**不需要生成任何长度计算**，只生成 `encode`。
-`find` 就是生成代码里的 `match name { b"id" => Some(0), ... }`。`Error` 新增
-`DuplicateMember`；`MissingMember(&'static str)` 与 `InvalidMemberIndex` 现在都真正被用到。
+`find` 就是生成代码里的 `match name { b"id" => Some(0), ... }`。重名、越界索引、缺失必需成员
+三个构造点现在都真正被用到，各自以 `message_static` / `message` 报出（§18.4）。
 `crates/binary-tests/tests/named.rs` 用手写的 `Person` 模拟派生结果，14 个用例覆盖
 精确 wire 字节、乱序、未知成员跳过、重名、必填缺失、optional 默认值、4 字节前缀、
 截断错误、decode→encode 幂等与 anchor 兜底。
 
 ### 为什么成员读写是自由函数
 
-第一版把成员写入做成 `impl Encoder { fn named(..) }`，论证的是「**可行**」：模块边界不是层
-边界，固有 `impl` 写在 `named.rs` 与写在 `encoder.rs` 调用点完全一致（std 就把 `impl File`
+把成员写入做成 `impl Allocator { fn named(..) }` 是可行的，论证的是「**可行**」：模块边界不是层
+边界，固有 `impl` 写在 `named.rs` 与写在 `allocator.rs` 调用点完全一致（std 就把 `impl File`
 放在平台模块里）。但「可以」不等于「应该」—— 名字 `named` 读起来像「读写整个 named 对象」，
-实际只写**一个成员**；把它挂在 `Encoder` 上，等于让字节游标认识一种对象形状，而 `Vec`、
+实际只写**一个成员**；把它挂在 `Allocator` 上，等于让字节游标认识一种对象形状，而 `Vec`、
 tuple 都没有这种待遇。
 
 所以归属和名字一起改：`write_named_member` / `read_named_member` 是 `named.rs` 里的自由
-函数，`Encoder` / `Decoder` 退回纯字节游标。
+函数，`Allocator` 退回纯字节容器，读侧只剩切片。
 
 |方案|买到|付掉|
 |:---|:---|:---|
 |`NamedObject<'_>` 状态 writer（serde `SerializeStruct` 风格）|强制「每个 name 跟一个 value」|对象边界是**外层长度前缀**，writer 本身没有状态、`finish()` 是空的；每个派生 `encode` 多一个 binding 加一个生命周期|
-|扩展 trait `NamedExt`|`Encoder` 的表面只剩字节操作|手写 impl 多一个 `use`，生成代码走 UFCS —— 为观感付接口税|
-|固有方法 `Encoder::named`（第一版）|调用点最短|名字误导成「整个对象」；`Encoder` 与 `Encode` 耦合；`write_name` 这个半操作被迫活在一个 `impl` 里|
+|扩展 trait `NamedExt`|`Allocator` 的表面只剩字节操作|手写 impl 多一个 `use`，生成代码走 UFCS —— 为观感付接口税|
+|固有方法 `Allocator::named`（已否决）|调用点最短|名字误导成「整个对象」；`Allocator` 与 `Encode` 耦合；`write_name` 这个半操作被迫活在一个 `impl` 里|
 |自由函数（现状）|协议与游标分离、名字直说 `member`、半操作消失、与 C++ `::binary::EncodeWithLengthPrefix` 同形|两个 crate 根名字；调用点从 `e.named(..)` 变成 `write_named_member(&mut e, ..)`|
 
 **半操作随固有 `impl` 一起消失了**：自由函数里两行连着写，不再需要一个「只写名字」的私有
@@ -777,8 +641,8 @@ tuple 都没有这种待遇。
 
 ### 为什么 `auto` 也没有留在游标上
 
-`Encoder::auto` / `Decoder::auto` 曾是游标上的两个转发方法，各一行（`v.encode_auto(self)` /
-`T::decode_auto(self)`）。删除的理由与 `named` 同源，只是更彻底：**位置由值决定，不由游标决定**。
+**位置由值决定，不由游标决定**——这是 `auto` / `named` 都不挂在游标上的理由，与它们的
+实现复杂度无关。
 一个类型同时「认识字节」和「认识怎么给值加前缀」，是把两种生命周期不同的职责绑在一起；
 游标退成纯字节之后，`Encode` / `Decode` 才是解码策略的唯一持有者。
 
@@ -790,7 +654,7 @@ tuple 都没有这种待遇。
 **代价不是理论上的。**§19.16 记过一次实测：`vec<bool>` 的逐元素循环写 `e.auto(item)` 时
 2150 ns，改成 `item.encode_auto(e)` 后 958 ns —— 转发层没被内联，每个元素多一次调用加一次
 `Result`。删掉这层包装后不存在「不小心用了慢写法」的路径；`collections.rs` 的
-`encode_items` / `encode_pairs` 正是当时漏掉的同类循环，这次一并改直。
+`encode_items` / `encode_pairs` 属于同类循环，因此也直接调元素钩子。
 
 读侧同理：`d.auto::<T>()` 把「按哪种策略解码」藏在游标上，`T::decode_auto(d)` 直接说明
 这是类型的解码策略；带推断的类型写 `Decode::decode_auto(&mut d)`，与 `T::decode_auto(d)` 等价
@@ -824,8 +688,8 @@ let __m = NamedMembers::<2>::parse(d, |name| match name {
 `&[u8]` 上的 `match` 不是「长度 + `memcmp` 链」：LLVM 把它编成**长度 switch → 首字节 switch →
 剩余字节逐个比较**，短名字 2~3 条 `cmp`，既没有 `bcmp` 调用也没有跳转表（反汇编见 §19.18）。
 
-曾经担心的对手是 C++ 的 packed 2×u64（`longdata` 方案）。**2026-11-09 已量（§19.18）：`match` 在
-现实 schema 上比它快 1.3~1.8×，而且表内存是 0 字节**（表方案要 64~2048 B），所以 derive 继续只生成
+对手是 C++ 的 packed 2×u64（`longdata` 方案）。**实测（§19.18）：`match` 在现实 schema 上
+比它快 1.3~1.8×，而且表内存是 0 字节**（表方案要 64~2048 B），所以 derive 只生成
 `match`，不预计算任何查找表、也不引 `const fn` 建表。
 
 分派树的深度只跟名字形状有关，跟成员数关系很小：16 个 6 字节等长名字（长度 switch 失效、
@@ -840,10 +704,10 @@ let __m = NamedMembers::<2>::parse(d, |name| match name {
 不改代码，也不用「应该会更快」的推断代替读数。三边对比只比各语言的最优构建，比值与绝对值
 分开看（§19.15.5 / §19.15.9）。下面按优先级排列。
 
-1. **O(1) 长度估计优先**。`LEN` 常量或 `len()` 能给出估计时走 `write_prefixed_bounded`，
+1. **O(1) 长度估计优先**。`LEN` 常量或 `len()` 能给出估计时走 `append_with_length_prefix_bounded`，
    一次预留、回填实际长度，不 `memmove`；给不出就 anchor 兜底。
    不为省 3 字节去递归遍历值树（§10）。
-2. **容器 memcpy 快路径（2026-11-08 已实现，encode 侧）**。C++ 有两道判断
+2. **容器 memcpy 快路径（encode 侧）**。C++ 有两道判断
    （`converters/ContainerConverter.hpp`）：`Copyable`（编译期：`sizeof(E) == 1`，或小端 + trivially
    copyable）与 `copy`（运行时 `dynamic_cast<LittleEndianConverter<E>*>`，确认元素 converter 就是
    规范 LE 那个，而不是用户替换过的自定义实现）。
@@ -852,14 +716,14 @@ let __m = NamedMembers::<2>::parse(d, |name| match name {
    `impl<T: Encode> Encode for Vec<T>` **重叠**（E0119，stable 无 specialization）。后来一度退成
    `Layout::POD: bool` 关联常量 + 容器内分支 —— 能工作，但那个常量是**公开可写、编译期不强制**
    的 unsafe 契约：外部 crate 一句安全代码 `const POD: bool = true`，解码侧就会把不可信字节
-   memcpy 成值（§19.10 代价 2）。2026-11-08 把它收回内部，改为**元素钩子**：
+   memcpy 成值（§19.10 代价 2）。所以整块能力收回内部，改为**元素钩子**：
 
    ```rust
    pub trait Layout { const LEN: usize = 0; }              // 不再有 POD
 
    // 内部钩子（`#[doc(hidden)]`），默认实现就是逐元素循环
-   fn Encode::encode_slice(items: &[Self], e: &mut Encoder<'_>) -> Result<()>;
-   fn Decode::decode_slice(d: &mut Decoder<'de>, count: usize) -> Result<Vec<Self>>;
+   fn Encode::encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()>;
+   fn Decode::decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>>;
    ```
 
    `Vec<T>` / `[T; N]` / `VecDeque<T>` 只写 `T::encode_slice(...)` / `T::decode_slice(...)`，
@@ -884,9 +748,9 @@ let __m = NamedMembers::<2>::parse(d, |name| match name {
    |用例|bulk|逐元素|
    |:---|---:|---:|
    |encode 1024 × i32（4100 B）|34.3 – 36.3 ns|141.8 – 146.1 ns|
-   |decode 1024 × i32（改前 1215 – 1440 ns）|**44.8 – 47.8 ns**|—|
+   |decode 1024 × i32（不走整块 1215 – 1440 ns）|**44.8 – 47.8 ns**|—|
 
-   解码 **26–31×**，是本项目目前最大的单项收益。**已定型为方案 A**（2026-11-08，§19.10）：
+   解码 **26–31×**，是本项目目前最大的单项收益。**定型为方案 A**（§19.10）：
    不为 `bool` 单独保留编码侧快路径。大量 `bool` 集合在实际应用中很难出现，真有密集布尔
    需求应当用 **bitset**；为了让一个罕见场景拆出第二个钩子、维护两份白名单、并给公开面再
    加一条契约，不划算。`Vec<bool>` 逐元素是明确接受的代价。完整实测与备选方案的否决理由见
@@ -897,29 +761,27 @@ let __m = NamedMembers::<2>::parse(d, |name| match name {
    已把它落地在标量的 `decode_slice` 钩子，默认钩子（外部类型）仍是 `with_capacity` + `push`。
    **§19.15.4 补测**：变长元素（`T::LEN == 0`）连 `with_capacity` 都没有——`Vec<String>` 走
    `Vec::new()` + `push`，64 个元素实测 **69 次分配 / 1.6 µs**；换 `Vec<&str>` 零拷贝是 351 ns。
-   **§19.15.14 已量**：扫描计数在 64 元素上要 88.7 ns，正好抵掉省下的 4 次 realloc
+   **§19.15.14 实测**：扫描计数在 64 元素上要 88.7 ns，正好抵掉省下的 4 次 realloc
    （净慢 1.2%）；免扫描的上界预留快 4.5% 但多占 3.5× 内存。结论是**不做预分配** —— 变长
    元素的解码成本在 64 次 `String` 分配上，`Vec<&str>` 零拷贝快 3.6×，杠杆在借用解码。
    编码侧相反：payload 已在内存里、长度可预知，容量预算由调用方在**构造期**给，见 §19.15.15。
-4. **错误默认不装箱**。`enum Error` 是 11 个变体的闭合枚举：静态消息（`message_static`）走
-   `Cow::Borrowed` 零分配，只有 `custom(impl Display)` 才分配一次字符串。默认路径不碰
+4. **错误默认不装箱**。`enum Error` 是五个变体的闭合枚举：静态消息（`message_static`）走
+   `Cow::Borrowed` 零分配，只有 `message(impl Display)` 才分配一次字符串。默认路径不碰
    `Box<dyn Error>`——那会拿走 `PartialEq` / `Eq` / `Clone`，而这三样是「能断言到具体变体」
-   的前提（§18.2）。需要保留原始错误类型时才显式选 `wrapped`（`Arc` + 文本相等，§18.7），
-   装箱因此是**可选**代价而不是默认定价。`Error` 仍是 24 字节（`Wrapped` 载荷 16 < `Cow<str>`
-   的 24）。
+   的前提（§18.1）。需要保留原始错误类型时才显式选 `wrapped`（`Arc` + 文本相等，§18.2、
+   §18.3），装箱因此是**可选**代价而不是默认定价。`Error` 仍是 24 字节（`Wrapped` 载荷 16 <
+   `Cow<str>` 的 24）。
 5. 不要接 `std::io::Read/Write`。C#/C++ 都没接，接进来只会让泛型和单态化变复杂。
 6. **owned 后端不给未写区域清零**（§19.15.17）：`src.len() >= 256` 的批量写入走
    `Vec::extend_from_slice`（追加到未初始化余量），不再用 `Vec::resize` 先清零再覆盖。
    4 KiB 写回 69.2 → 40.1 ns、1 MiB 28.8 → 18.6 µs，端到端 64 KiB `String` 1375 → 927 ns；
    改完 owned 只剩一次 malloc + free 的固定成本。C++ / C# 本来就是 `bounds` / `offset` 分离，
    只有 Rust 之前是两遍写。
-7. **不再有递归长度预测**（§10 已实施）。`test_no_recursive_length_prediction` 用计数器验证：
+7. **没有递归长度预测**（§10）。`test_no_recursive_length_prediction` 用计数器验证：
    `Vec<Counting>` 与 `Vec<Vec<Counting>>` 中每个叶子只 `encode` 一次（各 2 次调用），
-   且 wire 与重构前逐字节相同（`[6,2,1,2,2,1,2]` / `[7,6,2,1,2,2,1,2]`）。
-   代价是组合类型走 `write_prefixed` 兜底、带一次 ≤16 字节定长搬移；收益是去掉
-   O(d × N) 的重复遍历和公开接口。
-   按 **先基准后修改** 的规矩：当时尚无 harness，前后性能对比不做无数据推断；
-   **订正**：当晚已建 `crates/binary-bench`（§19），但本次重构前后专门对比仍未补测。
+   wire 为 `[6,2,1,2,2,1,2]` / `[7,6,2,1,2,2,1,2]`。代价是组合类型走
+   `append_with_length_prefix` 兜底、带一次 ≤16 字节定长搬移；收益是去掉 O(d × N) 的重复
+   遍历和一个公开接口。
 
 ---
 
@@ -957,7 +819,7 @@ let __m = NamedMembers::<2>::parse(d, |name| match name {
 crate 划分与逐文件职责只写一处：见 §9.1–§9.4 的模块与测试表（同样的清单留两份，必然漂移）。
 
 **命令只跑一次、数字只记一处**：下文各章不再复述 `cargo test` / `clippy` / `fmt` 这类命令，
-凡写「已通过」即当时按 §20.1 的矩阵整轮跑过，计数只在 §20.1 维护。本节只定义「什么算对齐」。
+凡写「已通过」即按 §20.1 的矩阵整轮跑过，计数只在 §20.1 维护。本节只定义「什么算对齐」。
 
 benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，理由见下表最后一行：
 
@@ -987,10 +849,10 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 
 ---
 
-## 9. 实现状态（2026-11-07 起，更新至 2026-11-09；当前总表见 §20）
+## 9. 实现状态
 
 `crates/` 的划分与逐文件职责只写在这一节。**验证数字、质量门与剩余项只在 §20 维护**，本节不重复；
-§9.1–§9.4 是「已经有什么」，§9.5 起是当时确认的语义、wire 边界与已关闭的待办。
+§9.1–§9.4 是「已经有什么」，§9.5 起是对齐时确认的语义、wire 边界与逐项结论。
 
 ### 9.1 `binary`：core（`no_std + alloc` 已验证）
 
@@ -999,8 +861,8 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 |`lib.rs`|`no_std` 入口（`extern crate alloc`）、模块声明与 re-export；feature 只有 `std` 与 `derive`（§17.5）|
 |`codec.rs`|三个 trait：`Layout` / `Encode`（`encode` + `encode_with_prefix` + `encode_auto` + `encode_slice` 内部钩子）/ `Decode<'de>`（`decode` + `decode_auto` + `decode_slice`）|
 |`length.rs`|前缀编解码 `encode_prefix` / `encode_prefix_wide` / `decode_prefix` / `prefix_header_len`；全部 `Result` 化，无静默截断（§18）|
-|`encoder.rs`|`Encoder<'a>`、`write_prefixed_bounded`、`write_prefixed`（16 阈值）、`PREFIX_SHRINK_LIMIT`（`pub(crate)`，不导出，§12.4）、`write_compact_int`（union tag 原语，§16）|
-|`decoder.rs`|`Decoder<'a>`、零拷贝 `take`、`with_prefix`、`read_compact_int`；`remaining()` 是唯一长度查询|
+|`allocator.rs`|`Allocator<'a>`、`append_with_length_prefix_bounded`、`append_with_length_prefix`（16 阈值）、`PREFIX_SHRINK_LIMIT`（`pub(crate)`，不导出，§12.4）、`append_prefixed_bytes`（`pub(crate)`，长度已知时一次预留）|
+|`converter.rs`|自由函数 `encode` / `decode`（紧凑整数，§16）、`encode_with_length_prefix` / `decode_with_length_prefix`；`pub(crate)` 的 `take` / `take_byte`（§4.3）|
 |`primitives.rs`|`u8`–`u128` / `i8`–`i128` / `f32` / `f64` / `bool`（读宽容 `b != 0`）/ `char`（4 字节）/ `usize` / `isize`|
 |`container.rs`|`String` / `str` / `Vec<T>` / `&[u8]` / `[T; N]`；整段 payload 委托 `T::encode_slice` / `T::decode_slice`（§6 第 2 条、§19.16）；O(1) `encode_with_prefix`；`Tuple` 1–12 由 `macro_rules!` 平铺（§11）|
 |`option.rs`|`Option<T>` = tag + value，auto 位置**无前缀**（§12.6）|
@@ -1008,7 +870,7 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 |`collections.rs`|`VecDeque` / `LinkedList` / `BinaryHeap` / `BTreeMap` / `BTreeSet` / `Cow`（`alloc`，无条件）+ `HashMap` / `HashSet`（`std`，hasher 泛型）；raw payload = `Vec<T>`，委托 `Vec::decode`（§19.14）|
 |`named.rs`|`write_named_member` / `read_named_member` / `NamedMembers<N>`；成员无条件带前缀（§5）|
 |`pod.rs`|私有 `write_bulk` / `read_bulk`：全 crate 唯一两处把 `&[T]` 当 `&[u8]` 重解释（§19.16）|
-|`error.rs`|闭合 `Error`（11 变体，含 `DuplicateMember` / `MissingMember` / `InvalidMemberIndex` / `InvalidTag`）；`Message` 持 `Cow<'static, str>`、`Wrapped` 持 `ErasedError`（`Arc<dyn core::error::Error + Send + Sync>`），静态消息零分配；两条降级路径见 §18.4 / §18.7|
+|`error.rs`|闭合 `Error`（5 变体：`BufferFull` / `NotEnoughBytes` / `LengthTooLarge` / `Message(Cow)` / `Wrapped(Arc<dyn Error>)`）；静态消息零分配；降级规则见 §18|
 |`hex.rs`|`Debug` 用的 32 字节 hex 预览（私有）|
 |`oneshot.rs`|`to_vec` / `from_slice`：raw 位置的入口，每次分配、不复用缓冲、不接受尾随字节（§4）|
 
@@ -1029,19 +891,19 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 
 |测试文件|条数|覆盖|
 |:---|---:|:---|
-|`tests/wire.rs`|44|基础 wire / anchor / `compact_int` / 整块与逐元素对照 / 端序契约 / tuple / oneshot / `Debug` / `write_prefixed*`|
-|`tests/derive.rs`|25|派生宏：union 8 + with 5 + C# record 1 等分组|
-|`tests/errors.rs`|15|自定义错误降级、`Cow` 形态、外层包装、位置折算、`Wrapped` 保留类型、变体语义（§18）|
+|`tests/wire.rs`|55|基础 wire / anchor / `compact_int` / 整块与逐元素对照 / 端序契约 / tuple / oneshot / `Debug` / 前缀写入原语|
+|`tests/derive.rs`|27|派生宏：union 8 + with 5 + C# record 1 等分组|
+|`tests/errors.rs`|16|降级两通道、`Cow` 形态、外层包装、失败后游标不前进、`Wrapped` 保留类型、边界（§18）|
 |`tests/named.rs`|14|手写 named 实现交叉验证|
+|`tests/collections.rs`|13|容器与 `Vec<T>` / `Vec<(K, V)>` 逐字节相等、自定义 hasher、`Cow`、错位 payload（§19.14）|
 |`tests/smart_ptr.rs`|12|`Box` / `Rc` / `Arc` wire 透明、`?Sized`、递归 struct / union / tuple（§19.13）|
-|`tests/collections.rs`|11|容器与 `Vec<T>` / `Vec<(K, V)>` 逐字节相等、自定义 hasher、`Cow`、错位 payload（§19.14）|
 |`tests/borrow.rs`|8|借用成员零拷贝、解码指针落在输入缓冲内（§19.17）|
 |`tests/fixtures.rs`|2|74 条共享 fixture 的 `Encode` / `EncodeAuto` 双列逐字节 + 「每个用例都有对应行」断言（§12.5）|
 |`tests/fsharp_fixtures.rs`|1|5 条 F# union fixture 逐字节（§12.5）|
 |`tests/buffer_contents.rs`|1|owned 后端水位线：33 个 fixture case 编码后整段比对（§19.15.18）|
 |`tests/ui.rs`|1|驱动 27 个 compile-fail（trybuild，§15；`#[cfg(not(miri))]` 跳过）|
 
-合计 140 条集成用例。共享件在 `tests/common/mod.rs`（`round_trip` / `with_header` / `split_prefixed` /
+合计 150 条集成用例。共享件在 `tests/common/mod.rs`（`round_trip` / `with_header` / `split_prefixed` /
 `from_hex` …）与 `tests/common/cases.rs`（三张表共用的 name → 类型 → 值）。`binary` 自己另有
 `tests/length.rs` 11 条（原 `src/length.rs` 的内联 `mod tests`，已外移），`src/` 里不再有
 `#[cfg(test)] mod tests`。
@@ -1077,12 +939,12 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
   `EncodeWithLengthPrefix`，定长 value 也带前缀。详见 §5。
 - **派生宏生成的 wire 与手写实现一致**（`test_derive_wire_matches_handwritten_layout`），
   外层前缀宽度已按 §12.4 改成 16 阈值，与 C#/C++ 逐字节相等。
-- **长度预测不暴露、不递归**（§10 已实施）：`String` / `[u8]` / 定长元素集合 override
+- **长度预测不暴露、不递归**（§10）：`String` / `[u8]` / 定长元素集合 override
   `encode_with_prefix` 用 O(1) 精确长度；组合类型走默认 anchor，`auto_len` / `named_len` 已删除。
-- **tuple 平铺**（§11 已实施）：`encode` 最后成员 raw，`encode_auto` / `decode_auto` 全成员 auto
+- **tuple 平铺**（§11）：`encode` 最后成员 raw，`encode_auto` / `decode_auto` 全成员 auto
   且不加自身前缀；`((a,b),c)` 与 `(a,b,c)` wire 相同，可跨类型互解。
 
-### 9.6 wire 边界（当时的结论）
+### 9.6 wire 边界
 
 质量门与用例数见 §20.1，这里只留三条与字节有关的结论：
 
@@ -1104,49 +966,45 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 唯一的第三方依赖是 dev-dependency `trybuild 1.x`（冷启动约 2 MB 源码 / ~9 s 构建，离线机需先
 `cargo fetch`）；`cargo build` / `no_std` / 发布都不受影响。
 
-### 9.7 历史待办（全部结案）
+### 9.7 逐项结论
 
-以下是 2026-11-07～11-09 开的待办，现全部关闭或转成口径问题；§20.3 当前为空。
+逐项定点的结论，明细见对应章节；§20.3 当前为空。
 
-|曾列待办|结论|依据|
+|议题|结论|依据|
 |:---|:---|:---|
-|`union` 派生|✅ 已完成：tag 紧凑整数，payload 按 tuple object，auto 位置无自身前缀|§16|
-|八个标准容器|✅ `Box` / `Rc` / `Arc` + `VecDeque` / `LinkedList` / `BinaryHeap` / `BTreeMap` / `BTreeSet` / `Cow` / `HashMap` / `HashSet` 全部落地，零新增依赖；`KeyValuePair` 复用 `(K, V)` tuple|§19.13 / §19.14|
-|`with` / `borrow`|✅ 成员级转换器用 `Repr` 作契约，借用成员由成员类型表达|§19.17|
-|整块读写快路径|✅ `Vec<i32>` ×1024：encode 38 vs 逐元素 82 ns，decode 44.8–47.8 vs 1215–1440 ns；能力从 `Layout::POD` 收紧成元素内部钩子，`bool` / `char` 仍逐元素|§6 第 2 条 / §19.10 / §19.16|
-|benchmark harness|✅ Rust 手写 + C# JIT/AOT + C++ integration 三边同表；C# AOT 未并入同口径矩阵、C++ union 场景仍缺，属口径与覆盖问题（记 §19.6）|§19|
-|C++ 侧语料|✅ 33 条实测字节；顺带量出并修掉 C++ 在 17..=127 字节 payload 上写宽头的 bug（`binary-cxx` c6c11cb），重生成后全部逐字节相等|§12.5|
-|错误模型是否整体擦除|❌ 否决：失败路径只多约 5.5 ns + 一次分配，但失去可 `match` 的可观测性|§18.8.7 / §19.3|
-|API 审计|✅ 8 条已修、1 条保留（named 成员错误位置不回折），明细见下|—|
+|`union` 派生|tag 紧凑整数，payload 按 tuple object，auto 位置无自身前缀|§16|
+|八个标准容器|`Box` / `Rc` / `Arc` + `VecDeque` / `LinkedList` / `BinaryHeap` / `BTreeMap` / `BTreeSet` / `Cow` / `HashMap` / `HashSet` 全部落地，零新增依赖；`KeyValuePair` 复用 `(K, V)` tuple|§19.13 / §19.14|
+|`with` / `borrow`|成员级转换器用 `Repr` 作契约，借用成员由成员类型表达|§19.17|
+|整块读写快路径|`Vec<i32>` ×1024：encode 38 vs 逐元素 82 ns，decode 44.8–47.8 vs 1215–1440 ns；能力从 `Layout::POD` 收紧成元素内部钩子，`bool` / `char` 仍逐元素|§6 第 2 条 / §19.10 / §19.16|
+|benchmark harness|Rust 手写 + C# JIT/AOT + C++ integration 三边同表；C# AOT 未并入同口径矩阵、C++ union 场景仍缺，属口径与覆盖问题（记 §19.6）|§19|
+|C++ 侧语料|33 条实测字节，与 Rust 逐字节相等（C++ 在 `17..=127` 上写宽头的问题已修，`binary-cxx` c6c11cb）|§12.5|
+|错误模型是否整体擦除|否决：失败路径只多约 5.5 ns + 一次分配，但失去可 `match` 的可观测性|§18.1 / §19.3|
+|API 审计|8 条按结论落地、1 条有意保留（named 成员错误位置不回折），明细见下|—|
 
-审计项明细（前八条已修，最后一条是有意保留）：
+审计项（最后一条是有意保留）：
 
 |审计项|结论|
 |:---|:---|
-|`Decoder::take(n)` 溢出|✅ 判据改为 `n > buf.len() - pos`；`take(usize::MAX)` 得 `NotEnoughBytes` 而非 panic（`test_take_past_the_end_is_not_enough_bytes`）|
-|前缀编码签名|✅ `encode_prefix` / `encode_prefix_wide` 改 `Result<usize>`：`LengthTooLarge`（`len > i32::MAX`）与 `BufferFull`（1 / 4 字节都放不下）；`debug_assert!` 全删，release 不再有静默截断|
-|`bool::decode` 的宽容|✅ 照抄不是疏忽：真实 C# 探针（`00 → False`，`01` / `02` / `FF → True`）与 C++ 一字节 memcpy 同表现，保留 `b != 0`，文档写明「读宽容、写规范」|
-|`Encoder` / `Decoder` 的 `Debug`|✅ 手写实现 + `hex.rs` 的 32 字节预览；不用 derive（会把 `Vec` 的保留尾巴倒出来）|
-|缓冲复用|✅ 不做：`finish(self)` 吃掉 `Vec` 是刻意的，`on_slice` 是唯一复用出口；`impl Default` 随之删除（§4）|
-|一次性辅助函数|✅ `binary::to_vec(&T)` / `binary::from_slice::<T>(&[u8])`，raw 位置（§4）|
-|`Decoder::len()` / `is_empty()` / `position()`|✅ 全删：前两个报的是输入总长，`position()` 在 scoped decoder 里是作用域相对值却名字像绝对值。`remaining()` 唯一，绝对偏移 = `buf.len() - remaining()`|
-|`Pod` 空壳|✅ 删掉 `pub unsafe trait Pod`（写不出配套 `impl`，E0119），改为元素内部钩子|
-|named 成员的错误位置|❗ 不回折：`NamedMembers::value` 在 detached payload 上建 decoder，成员内偏移是成员自身坐标、外层 `remaining()` 不随之前进；要绝对位置只能在成员 impl 里自己拼（`Error::message`）|
+|`converter::take(n)` 溢出|判据是 `n > buf.len()`；`take(usize::MAX)` 得 `NotEnoughBytes` 而非 panic|
+|前缀编码签名|`encode_prefix` / `encode_prefix_wide` 改 `Result<usize>`：`LengthTooLarge`（`len > i32::MAX`）与 `BufferFull`（1 / 4 字节都放不下）；`debug_assert!` 全删，release 不再有静默截断|
+|`bool::decode` 的宽容|照抄不是疏忽：真实 C# 探针（`00 → False`，`01` / `02` / `FF → True`）与 C++ 一字节 memcpy 同表现，保留 `b != 0`，文档写明「读宽容、写规范」|
+|`Allocator` 的 `Debug`|手写实现 + `hex.rs` 的 32 字节预览；不用 derive（会把 `Vec` 的保留尾巴倒出来）|
+|缓冲复用|不做：`finish(self)` 吃掉 `Vec` 是刻意的，`on_slice` 是唯一复用出口；`impl Default` 随之删除（§4）|
+|一次性辅助函数|`binary::to_vec(&T)` / `binary::from_slice::<T>(&[u8])`，raw 位置（§4）|
+|读侧的长度 / 位置查询|一个都不提供：`buf.len()` 就是剩余量，绝对偏移 = `总长 - buf.len()`；`position()` 在嵌套载荷里会被读成绝对值，删掉|
+|`Pod` 空壳|删掉 `pub unsafe trait Pod`（写不出配套 `impl`，E0119），改为元素内部钩子|
+|named 成员的错误位置|不折回：`NamedMembers::value` 拿到的是独立切片，成员内失败只能由成员 impl 自己拼相对距离（`Error::message`）|
 
 ---
 
-## 10. 已实施：移除 `payload_len()`，改为 converter 内部预测（2026-11-07）
+## 10. 长度预测只在 converter 内部，且只用 O(1) 信息
 
-> **状态**：**已实施并验证**。本节保留决策依据与 C#/C++ 源码考证；
-> §2 / §3 / §4 / §6 / §9 已同步为新实现。
-> `cargo test` 当时 45 passed / 0 failed（§11 后为 46 passed），wire 逐字节不变。
+`Encode` 不暴露长度查询接口：没有 `payload_len()`，也没有 `auto_len()` / `named_len()`。
+框架不递归遍历值树；需要 1 字节头的地方由具体 converter 给出 O(1) 长度（`len()`、`LEN`、
+`len() * LEN`），给不出就走 anchor 兜底。前缀的写入点因此落在 `Allocator` 的原语和 trait 的
+`encode_with_prefix` 默认实现上（§2、§3），不在某个公开的长度接口上。
 
-### 10.1 决策
-
-从 `Encode` trait **移除公开的 `payload_len()` 接口**，连带删除 `auto_len()` / `named_len()`。
-长度预测不再是框架职责，只保留在具体 converter 内部，且只用 O(1) 可得的信息。
-
-### 10.2 为什么：开销与回报不成比例
+### 10.1 为什么：开销与回报不成比例
 
 递归精确预测唯一的作用是让 length prefix 用最优头长度（1 字节而不是 4 字节）。但 1 字节头
 只在 `<= 127` 装得下，而 anchor 路径已在 `actual <= 16` 时压缩（§12.4），两个条件一夹，
@@ -1162,11 +1020,10 @@ benchmark 变体从 4 个扩到 5 个；第 6 个（Rust dyn）做不出来，�
 
 窗口两侧的收益都是零：`<= 16` 时 anchor 已经用 1 字节头，`>= 128` 时 1 字节头根本表示不了。
 窗口内的绝对收益封顶 3 字节、相对收益下限 `3 / (4 + 127) ≈ 2.3%`；有 N 个这样的对象时总收益
-`3N`，比例不会因为对象变多而改善（分母同比例变大）。而递归 `payload_len()` 的开销随值树
-规模增长（重构前实测：嵌套深度 d 的叶子被调用 d 次，总代价 O(d × N)）。
-为这 3 字节遍历整棵值树不划算。用户结论：**照抄 C# / C++，只在转换器内部做必要的长度预测**。
+`3N`，比例不会因为对象变多而改善（分母同比例变大）。代价却是递归遍历整棵值树：嵌套深度 d
+的叶子被调用 d 次，总代价 `O(d × N)`。为这 3 字节付这个代价不划算。
 
-### 10.3 C# / C++ 的「内部预测」怎么做（源码依据）
+### 10.2 C# / C++ 的内部预测（源码依据）
 
 C# `Allocator::AppendWithLengthPrefix`（`Allocator.Module.cs` 的 `maxLength` 重载）：
 
@@ -1192,50 +1049,15 @@ FinishCreate(ref allocator, actual + numberLength);
   （C# `Allocator::AppendWithLengthPrefix`（`AllocatorAction<T>` 重载）、
   C++ `Converter<T>::EncodeWithLengthPrefix`）。
 
-这也说明「length prefix 优先让 converter 自己预测精确长度，避免 `FinishAnchor` 的
-memmove；`FinishAnchor` 只作兜底」这条约定指的是 **converter 自己**，
-不是框架递归遍历整棵值树。重构前 §2 的设计把预测职责错放到了公开 trait 上，偏离了这条约定。
-
-Rust 比 C# 更有条件做对：`String::len()` 就是 UTF-8 wire 字节数、`Vec<u8>::len()` 是精确长度、
+这个分工是这条设计的依据：预测属于**具体 converter**，不属于框架，所以接口上不暴露长度查询。
+Rust 比 C# 更有条件做对——`str::len()` 就是 UTF-8 wire 字节数、`Vec<u8>::len()` 是精确长度、
 定长元素集合是 `len * LEN`，全是 O(1) 精确值，连上界都不需要。
 
-### 10.4 采用的 API 形态（可选钩子）
+### 10.3 谁给长度
 
-三个候选（可选钩子 / 方法族照抄 C# / 只留 `encode` 加一律 anchor）中，用户确认按
-**可选钩子**实施。它把前缀写入点从 `Encoder` 挪到 trait 层，同时 `encode` 仍只写
-raw payload，`auto` 默认由 `Layout::LEN` 统一分派。
-**后续修正（§11）**：tuple 必须能 override `auto`，因此补了 `encode_auto` /
-`decode_auto` 两个带默认实现的钩子；「不可 override」只对非 tuple 类型成立。
-下面的代码块是**当时的形状**，现行 API 见 §3 与 §11。
-
-```rust
-pub trait Encode: Layout {
-    /// 只写 raw payload，不写前缀
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()>;
-
-    /// 带前缀编码。默认走 anchor 兜底；具体 converter 可用 O(1) 长度覆盖，
-    /// 走「预留头 → 一次写入 → 回填实际长度」的无 memmove 路径。
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write_prefixed(|e| self.encode(e))
-    }
-}
-
-impl Encoder<'_> {
-    pub fn auto<T: Encode + ?Sized>(&mut self, v: &T) -> Result<()> {
-        match T::LEN {
-            0 => v.encode_with_prefix(self), // 变长：由 converter 决定
-            _ => v.encode(self),             // 定长：无前缀
-        }
-    }
-}
-```
-
-派生宏与自定义类型**只需实现 `encode`**；`encode_with_prefix` 是可选的，
-**没有任何长度查询接口被暴露**。`Encoder` 新增原语 `write_prefixed_bounded(max_len, f)`：
-按 `max_len` 算头长度并一次预留，`f` 写入后返回实际字节数，再把实际长度回填进预留的头
-（头长度不变），对应 C# 的 `AppendWithLengthPrefix(maxLength, ...)`。
-
-分层：
+`str` / `String` / `[u8]` / `Vec<u8>` 用 `len()`；`Vec<T>` / `[T; N]` 在 `T::LEN = n` 时用
+`len() * n`；其余一律 anchor。派生宏与自定义类型只需实现 `encode`——`encode_with_prefix` 的
+默认实现就是 anchor 路径，`T::LEN != 0` 的类型则由 `auto` 直接写裸 payload，不产生前缀（§3）。
 
 |类型|路径|长度来源|
 |:---|:---|:---|
@@ -1244,43 +1066,17 @@ impl Encoder<'_> {
 |变长元素集合 / tuple / named object / `Option<T>`|默认 anchor|兜底，**不递归预测**|
 |自定义 / 派生结构体|默认 anchor|兜底|
 
-### 10.5 wire 影响（已验证）
+`append_with_length_prefix_bounded(max_len, f)` 是这条分层在写侧的落点：按 `max_len` 算头长度
+并一次预留，`f` 写入后返回实际字节数，再把实际长度回填进预留的头（头长度不变，`actual <= 16`
+时才压缩到 1 字节头），对应 C# 的 `AppendWithLengthPrefix(maxLength, ...)`。
 
-**逐字节不变**：`test_named_wire_exact`、`test_long_prefix_boundary`、
-`test_named_long_value_4byte_prefix`、零字节类型系列和
-`test_no_recursive_length_prediction` 的 wire 断言全部原样通过。
-anchor 兜底压缩后仍写 1 字节头，与精确路径的字节一致，只是内部从「先算后写」
-变成「先写后回填」。
+### 10.4 wire 影响
 
-> ⚠️ **2026-11-07 起本条已被 §12.4 修订**：实测 C#/C++ 的 anchor 只在 `actual <= 16` 时压缩，
-> 17..=127 保留 4 字节头；本节的「anchor 压缩后与精确路径字节一致」只对 `<= 16` 成立。
-> 按上界算头（`EncodeLength(maxLength)`）的方案**不做**，见 §12.3。
+精确预测与 anchor 的差别只在 `17..=127`：前者写出 1 字节头，后者保留 4 字节头
+（`80 00 00 LL`）。`<= 16` 两侧都是 1 字节头，`>= 128` 两侧都是 4 字节头——payload 字节三者
+完全相同，所以共享 fixture（§12.5）对定长与短 payload 类型逐字节不变。
 
-### 10.6 执行结果
-
-- 已删除：`Encode::payload_len()`、`auto_len()`、`named_len()`、
-  `Encoder::with_prefix(Option<usize>, f)` / `precise_prefix`、各 impl 里的 `payload_len` 覆盖。
-- 已新增：`Encode::encode_with_prefix`（默认按 `LEN` 分流）、
-  `Encoder::write_prefixed_bounded(max_len, f)`、`write_prefixed` 改为公开。
-- 已 override：`str` / `String` / `&str` / `[u8]` / `&[u8]` 用 `len()`；
-  `Vec<T>` / `[T; N]` 在 `T::LEN = n` 时用 `len() * n`。
-- 已改：`codec.rs`、`encoder.rs`、`container.rs`、`option.rs`、`named.rs`、`lib.rs`；
-  `decoder.rs` 零改动。
-- 测试：`Unpredictable` / `Opaque` 改为只实现 `encode`；`test_payload_len_recursion_count`
-  改为 `test_no_recursive_length_prediction`（每叶子只 encode 一次）；
-  新增 `test_write_prefixed_bounded_writes_actual_length`；编码侧 `with_prefix` 用例改用
-  `write_prefixed_bounded` / `write_prefixed`。
-- 文档：§0 / §2 / §3 / §4 / §5 / §6 / §9 已全部同步。
-- **后续修正（§11）**：补上 tuple 的 `encode_auto` / `decode_auto` override，
-  修复嵌套 tuple 多一个外层前缀、破坏平铺等价的问题。
-- **未做（当时，2026-11-07 白天）**：按「先基准后修改」，彼时尚无 benchmark
-  harness，不做无数据推断。**订正（同日晚 → §19）**：`crates/binary-bench` 手写 harness
-  已建立，三边对照与错误模型 A/B 均已跑出数据；但「本次重构前后」的专门对比仍未补测，
-  不做事后推断。
-
----
-
-## 11. 已实施：tuple 平铺语义（2026-11-07）
+## 11. tuple 平铺语义
 
 ### 11.1 约束
 
@@ -1313,12 +1109,11 @@ Decode 侧 `Decode` / `DecodeAuto` 完全对称。
 |`encode_auto`（C# `EncodeAuto`）|成员展开；**所有成员 auto**；**无外层前缀**|
 |`encode_with_prefix`（C# `EncodeWithLengthPrefix`）|**外层前缀** + `encode`（最后 raw）|
 
-### 11.3 Rust 侧修复
+### 11.3 `encode_auto` / `decode_auto`
 
-§10 重构后 `Encode` 只有 `encode` + `encode_with_prefix`，`auto` 入口（当时的
-`Encoder::auto`，2026-11-09 已删、改为 `value.encode_auto(e)`，见 §5）对变长类型
-直接调 `encode_with_prefix` —— 对一般类型正确，对 tuple 则错：变长子 tuple 会多一个
-整体前缀。修复前实测：
+`Encode` 只有 `encode` + `encode_with_prefix`，`auto` 入口（`value.encode_auto(e)`，§5）
+对变长类型直接调 `encode_with_prefix`——对一般类型正确，对 tuple 则错：变长子 tuple 会多
+一个整体前缀。错误形态：
 
 ```text
 nested (26 bytes): b0 06 ... f4 01 00 00 | 08 | 03 61 6d 79 07 00 00 00 | 6c 6f 67 69 6e
@@ -1326,13 +1121,13 @@ flat   (25 bytes): b0 06 ... f4 01 00 00 |     03 61 6d 79 07 00 00 00 | 6c 6f 6
                                           ^ 多余的 0x08 外层前缀
 ```
 
-修复：给 `Encode` 加 `encode_auto`、给 `Decode` 加 `decode_auto`（都带默认实现），
-`auto` 入口改为调用它们；1–12 元 tuple（`macro_rules!` 生成，见 §11.5）
-override 这两个方法为「所有成员 auto、不加自身前缀」，而 `encode` / `decode` 的 raw 语义保持不变。
-`write_named_member` 仍用 `encode_with_prefix`，所以 named object 成员不会误用平铺 override。
+`Encode` 因此有 `encode_auto`、`Decode` 有 `decode_auto`（都带默认实现），`auto` 入口只调用
+它们；1–12 元 tuple（`macro_rules!` 生成，见 §11.5）override 这两个方法为「所有成员 auto、
+不加自身前缀」，`encode` / `decode` 的 raw 语义不变。`write_named_member` 仍用
+`encode_with_prefix`，所以 named object 成员不会误用平铺 override。
 
-这也说明 §10 里「`EncodeAuto` 不需要 trait 方法」的判断**只对非 tuple 类型成立**：
-`auto` 必须由 converter 决定边界由谁提供，tuple 是必须 override 的例外。
+这也说明「`EncodeAuto` 不需要 trait 方法」只对非 tuple 类型成立：`auto` 的边界由谁提供必须由
+converter 决定，tuple 是必须 override 的例外。
 
 ### 11.4 wire 断言（25 字节例子）
 
@@ -1346,7 +1141,7 @@ b0 06 00 00 00 00 00 00  f4 01 00 00  03 61 6d 79  07 00 00 00  6c 6f 67 69 6e
 断言：嵌套 `((1712L, 500), ("amy", 7), "login")` 与平铺 `(1712L, 500, "amy", 7, "login")`
 都产出这 25 字节，且两种类型都能解出对方写出的 payload。
 
-### 11.5 元数上限与 `macro_rules!` 重写（2026-11-07）
+### 11.5 元数上限与 `macro_rules!`
 
 原来 1..=5 是手写的 20 个 `impl`（约 190 行），6 元 tuple 直接编译失败：
 
@@ -1392,7 +1187,7 @@ bench 复跑与重写前同量级：encode tuple raw 28.1 ns、auto 32.9 ns、de
 
 第三条正是 §11 那次修复的核心性质（嵌套 tuple 在 wire 上压平），C# 侧一直有断言；Rust 侧
 对应的是 `test_tuple_flatten_equals_nested`。所以**不需要新增 C# fixture**：元数覆盖已经在
-C# 自己的测试里，缺的只是「同一组值两边字节一致」这一步，本轮补上了。
+C# 自己的测试里，缺的只是「同一组值两边字节一致」这一步，共享 fixture 补的就是它。
 
 #### 11.5.2 10 元 tuple 的三边字节一致（实测）
 
@@ -1413,12 +1208,11 @@ C# 的 `Length == 62` 与这条 hex 同时说明：`ValueTuple` 第 8 个位置�
 
 ---
 
-## 12. 跨语言 wire 实测（2026-11-07）
+## 12. 跨语言 wire 实测
 
-> **状态（2026-11-08 更新）**：本节是 2026-11-07 的实测记录，**§12.4 的 anchor 阈值修改
-> 当天即已实施**（见 §12.4 标题与 §2 的状态注）；表中「改后」指实施后的字节，不是待办。
-> 此前的文档只做了源码考证，没有跑过真实 C# 输出；本节把三边的字节摆在一起，推翻了 §2 里
-> 「C# `FinishAnchor` 与本实现同构」的判断。
+> 三边同 payload 的真实字节对照。只有在把三边字节摆在一起之后才看清：三者各有一条宽度
+> 策略，anchor 只在 `actual <= 16` 时压缩到 1 字节头，`17..=127` 保留 4 字节头（§12.3、
+> §12.4）。「C# `FinishAnchor` 与本实现同构」是不成立的。
 
 ### 12.1 方法
 
@@ -1463,19 +1257,17 @@ C# 的 `Length == 62` 与这条 hex 同时说明：`ValueTuple` 第 8 个位置�
 
 |路径|C#|C++|Rust|
 |:---|:---|:---|:---|
-|exact（能 O(1) 预测）|按预测长度定宽度，回填实际值|同（容器只对连续 + blittable，2026-11-08 补齐）|同 ✅|
-|anchor（无法预测）|占 4 字节；`actual <= 16` 才压缩（`Allocator::FinishAnchor` 的 `Limits` 常量）|占 4 字节；`<= 16` 才压缩（`Allocator::FinishAnchor` 的 `AllocatorAnchorShrinkLimits` 常量）|同 ✅（§12.4 已改）|
+|exact（能 O(1) 预测）|按预测长度定宽度，回填实际值|同（容器只对连续 + blittable）|同|
+|anchor（无法预测）|占 4 字节；`actual <= 16` 才压缩（`Allocator::FinishAnchor` 的 `Limits` 常量）|占 4 字节；`<= 16` 才压缩（`Allocator::FinishAnchor` 的 `AllocatorAnchorShrinkLimits` 常量）|同（§12.4）|
 |string|上界 `3 * chars + 3` 定宽度（`Allocator::AppendWithLengthPrefix` 的 `GetMaxByteCount`）|精确字节数 `size * item.size()`|精确字节数（`str::len()`）|
-|`Option`（auto）|无前缀（`NullableConverter` override）|无前缀|同 ✅（§12.6 已改）|
+|`Option`（auto）|无前缀（`NullableConverter` override）|无前缀|同（§12.6）|
 
 于是出现两组关系：
 
 - Rust ↔ C++：**完全一致** —— anchor 阈值、字符串宽度（都用精确字节数）、容器头宽都相同，
-  且与主机端序无关。大端曾经是例外（C++ 的容器退回 anchor 宽头，写 24 字节），2026-11-08
-  已修（§12.5 末条）。
-  容器曾经不一致：C++ 的容器路径不做长度预测，定长元素 payload 落在 17..=127 字节时保留
-  4 字节头，Rust / C# 写 1 字节（`vec_i32_5` 是唯一撞上的用例）。2026-11-08 修掉，机制与
-  修法见 §12.5。
+  且与主机端序无关（大端由四架构矩阵覆盖，§19.11）。容器的长度预测同样只给连续 +
+  blittable 元素：定长元素 payload 落在 `17..=127` 字节时两边都写 4 字节头（`vec_i32_5`
+  夹住这条边界）。
 - Rust ↔ C#：只在 string 的 `42..=127` 字符区间不同——**C# ↔ C++ 在同一区间也不同**，
   说明参考实现之间本来就不逐字节相等。
 
@@ -1485,19 +1277,19 @@ C# 的 `Length == 62` 与这条 hex 同时说明：`ValueTuple` 第 8 个位置�
 C# 的 string 上界差一个 `O(n)` 的字符扫描才能复刻（`str` 没有 O(1) 字符数），
 为 3 字节不值得；C++ 也没这么做。**Rust 跟随 C++**。
 
-### 12.4 决策：anchor 阈值改成 16（已实施）
+### 12.4 决策：anchor 阈值是 16
 
 ```rust
-// encoder.rs
+// allocator.rs
 pub(crate) const PREFIX_SHRINK_LIMIT: usize = 16;   // 与 C# Limits / C++ AllocatorAnchorShrinkLimits 一致
 if actual <= PREFIX_SHRINK_LIMIT && 尾部余量够 { /* 压缩，搬移 <= 16 字节 */ }
 else { /* 保留 4 字节，只回填长度 */ }
 ```
 
-**常量不导出**（`pub(crate)`，2026-11-07 决定）。两种宽度都是合法 wire——读端遇到任何长度
+**常量不导出**（`pub(crate)`）。两种宽度都是合法 wire——读端遇到任何长度
 都能接受 4 字节头——所以这个数字是**编码侧的规范化策略**，不是解码规则，只有生产端需要；
-调用方要的是行为，从 `write_prefixed` 拿到即可。反过来，`pub` 会把一次调优决定升级成 semver
-承诺：这条线本来就从 127 改到 16（本节），若已发布，改动就是 breaking；而且公开的常量会
+调用方要的是行为，从 `append_with_length_prefix` 拿到即可。反过来，`pub` 会把一次调优决定升级成 semver
+承诺：这个阈值是调优数字（127 → 16 就是一次调整），一旦发布，改它就是 breaking；而且公开的常量会
 诱导「调一下没关系」的改动，实际会破坏与 C#/C++ 的逐字节相等。测试侧改为在 `wire.rs`
 自带一份 `const PREFIX_SHRINK_LIMIT = 16`，由 16 / 17 两个字节级断言钉住——比断言「库里的
 常量等于 16」更强，因为钉的是 wire 而不是符号。同理，`prefix_header_len` /
@@ -1507,23 +1299,24 @@ else { /* 保留 4 字节，只回填长度 */ }
 
 1. **字节对齐**：named object、`Vec<可变长元素>`、嵌套组合在 `17..=127` 区间与 C#/C++ 一致，
    fixture 可以逐字节断言，而不是只能断言「能互解」。
-2. **去掉 memmove**：改前 `actual <= 127` 都会 `copy_within`，搬移量等于 payload 长度、最坏 127 字节；
-   改后搬移上限 16 字节；2026-11-08 起这 16 字节进一步改成两次定长 `u64` 搬移，连运行时长度
-   的 `memmove` 调用也去掉（§19.15.7）。
+2. **去掉 memmove**：阈值若放在 127，`actual <= 127` 都要 `copy_within`，搬移量等于 payload
+   长度、最坏 127 字节；16 把搬移上限压到 16 字节，且由两次定长 `u64` 拷贝完成，连运行时
+   长度的 `memmove` 调用也没有（§19.15.7）。
 3. **代价可控**：区间内多 3 字节，占该对象总长 2.3% ~ 14.3%（`3/131` ~ `3/21`），换来近乎零搬移；
    C#/C++ 已经用数据选过这条路。
 
-**实施时发现的隐藏 bug**：保留 4 字节头这一支原来调 `encode_prefix`，而它在
-`len <= 127` 时只写 1 字节 —— 于是 `actual = 17` 写出 `11 00 00 00`（三个残留零字节），
-wire 直接损坏。宽头必须强制写 4 字节，为此新增 `length::encode_prefix_wide`
-（`encode_prefix` 的宽支也复用它）。这个 bug 只有把阈值下调到 16 才会被触发：
-原来那条分支只可能遇到 `actual > 127`。
+**宽头必须强制写 4 字节**。阈值是 16 之后，保留宽头这一支会拿到 `17..=127` 的 `actual`，
+而 `encode_prefix` 在这个区间只写 1 字节——`actual = 17` 就会写出 `11 00 00 00`（三个残留
+零字节），wire 直接损坏。所以宽头走 `length::encode_prefix_wide`（`encode_prefix` 的宽支也
+复用它），与 `len <= 127` 的窄头彻底分开。
 
-影响面（已逐个核对）：`test_named_wire_exact`、`test_derive_wire_matches_handwritten_layout`
-从 `0x11` 变成 `80 00 00 11`；新增 `test_write_prefixed_shrink_boundary`（16 / 17 边界）与
-`test_write_prefixed_wire_matches_csharp`。`payload <= 16` 的用例（`Tiny`、`Vec<Vec<i32>>`）不变。
+钉住这个边界的用例：`test_named_wire_exact` 与 `test_derive_wire_matches_handwritten_layout`
+的外层头是 `80 00 00 11`（不是 `0x11`）；
+`test_append_with_length_prefix_shrink_boundary`（16 / 17 边界）与
+`test_append_with_length_prefix_wire_matches_csharp` 双向对照；`payload <= 16` 的用例
+（`Tiny`、`Vec<Vec<i32>>`）不受影响。
 
-### 12.5 fixture 管道（已建成）
+### 12.5 fixture 管道
 
 **一张共享表 + 一张 union 表**。三个仓库各存一份 `wire.tsv`，内容逐字节相同：
 
@@ -1591,12 +1384,12 @@ TFM 共用，条件行会破坏「表 == 语料」。`fsharp.tsv` 因此保留�
      对应的语料，顺带校验反射与 AOT 两条路径字节一致，不一致就拒绝写文件。
 - **断言端**：`include_str!` 在编译期读表，`cases.rs` 的 `macro_rules!` 把用例名映射到具体
   类型的值；同一份字节既做 encode 断言也做 decode 回环。**用例名找不到会 panic，不会静默跳过**。
-- **C++ 容器的头宽：曾经错，已修（`binary-cxx` c6c11cb，2026-11-08）**。修之前
-  `ContainerConverter` 不 override `EncodeWithLengthPrefix`，落到
-  `Converter<T>::EncodeWithLengthPrefix` 的 anchor 路径 —— `Anchor()` 先占 4 字节，写完由
+- **C++ 容器的头宽与 Rust 一致**（`binary-cxx` c6c11cb）：`ContainerConverter` override 了
+  `EncodeWithLengthPrefix`。不 override 就会落到 `Converter<T>::EncodeWithLengthPrefix` 的
+  anchor 路径 —— `Anchor()` 先占 4 字节，写完由
   `FinishAnchor` 决定压不压，阈值是 `AllocatorAnchorShrinkLimits = 16`，**不是 127**；
   于是宽度成了「写完之后的字节数」的函数，定长元素 payload 落在 17..=127 字节时保留宽头。
-  实测（一次性探针）：payload 16 → wire 17 字节（`10` 开头），payload 17 → wire 21 字节
+  探针实测：payload 16 → wire 17 字节（`10` 开头），payload 17 → wire 21 字节
   （`80000011` 开头）。边界仍由两条既有用例夹住：`vec_i32_3`（12 B）与
   `vec_string_4x4`（20 B，元素变长）。
   这是**移植缺口，不是 wire 口径差异**：C# 的同一条 anchor 路径阈值也是 16
@@ -1614,11 +1407,10 @@ TFM 共用，条件行会破坏「表 == 语料」。`fsharp.tsv` 因此保留�
   它写 1 字节头、C# 写 4 字节头；收窄成 `Copyable` 单分支后三者同一条规则。两边各补 5 条
   用例（`…EncodeAutoBlittableShortLengthPrefixTest` / `…BlittableLengthPrefixBoundaryTest` /
   `…NonBlittableKeepsAnchorTest` / `…NonContiguousKeepsAnchorTest` / `…EmptyContainerTest`），
-  钉住「预测只给连续 + blittable」。修完 `vec_i32_5` 与 Rust 同字节（当时的桶列随之作废，
-  后来两张旧表合并成共享表时整列去掉）；§12.3 那句
-  「Rust ↔ C++ 在容器上不一致」随之改回**完全一致**。
-- **大端主机没有这条快路径 → 已修（2026-11-08，四架构矩阵首跑发现，同日修掉）**。
-  `Copyable` 原来把 `std::endian::native == std::endian::little` 也写进同一个谓词
+钉住「预测只给连续 + blittable」。`vec_i32_5` 与 Rust 同字节，§12.3 的「Rust ↔ C++
+在容器上完全一致」成立。
+- **大端主机走逐元素路径**（四架构矩阵覆盖，§19.11）。
+  `Copyable` 把 `std::endian::native == std::endian::little` 也写进同一个谓词
   （`sizeof(E) == 1` 除外），于是 s390x 上的 `vector<int32_t>` 只能走「逐元素
   `LittleEndianConverter`」+ anchor：20 字节 payload 大于 16，4 字节头原样保留，
   `80 00 00 14 | payload`，wire 24 字节；LE 上同一值是 21 字节。两种都是合法编码
@@ -1638,9 +1430,9 @@ TFM 共用，条件行会破坏「表 == 语料」。`fsharp.tsv` 因此保留�
   继续钉住这条；大端与 LE 在这条路径上本来就一致，所以 C# 语料的逐字节断言不受影响。
   修完 s390x 的 `vec_i32_5` 回到 21 字节，两条用例的 `if constexpr (std::endian::native == …)`
   分支删掉、改回单一断言，`<bit>` 引用一并删除。
-- **nullable 缺口：已补齐，随后并入共享表**。C++ 侧曾经没有 nullable converter，比 C# 少 6 条
-  （`i32opt_none` / `i32opt_some5` / `vec_i32opt` / `vec_i32opt_none` / `named_with_opt_none` /
-  `named_with_opt_some`）。现在 `binary-cxx` 有
+- **nullable 语料齐**。C++ 侧有 6 条 nullable 行（`i32opt_none` / `i32opt_some5` /
+  `vec_i32opt` / `vec_i32opt_none` / `named_with_opt_none` / `named_with_opt_some`），来自
+  `binary-cxx` 的
   `converters::OptionalConverter<std::optional<E>>`（virtual）与静态版同名类型（template），
   wire 是「长度前缀 tag（0/1）+ 与入口一致的 payload」，与 `VariantConverter` 的
   `std::variant<std::monostate, E>` 逐字节相同 —— 后者早就把 `monostate` 当「只写 tag」，
@@ -1659,30 +1451,27 @@ TFM 共用，条件行会破坏「表 == 语料」。`fsharp.tsv` 因此保留�
 - **named 的顺序不是契约**（§19.4）：C# 按名字序、Rust / C++ 按声明序。现有 3 条 named 用例
   的名字恰好已经是字典序（`id`/`name`、`a`/`b`/`c`、`x`），所以逐字节断言成立；真要加一条
   顺序不同的，只能断言「各自解出同一组值」，不能再比字节 —— 目前还没有这样的行。
-- **union / `std::variant` 已补**（2026-11-09，含 unit 用例，§16.4）：五条 union 行在
-  三张表里，四边 tag 与 payload 逐字节相同。
+- **union / `std::variant` 有语料**（含 unit 用例，§16.4）：五条 union 行在三张表里，
+  四边 tag 与 payload 逐字节相同。
 
-### 12.6 修正：`Option<T>` 原来多了一个前缀
-
-建 fixture 时发现 `i32opt_none` 对不上：C# 是 `00`，Rust 是 `01 00`。
+### 12.6 `Option<T>` 在 auto 位置没有整体前缀
 
 - **C#**：`NullableConverter` 直接 override `EncodeAuto` / `DecodeAuto`，写
   `tag + auto(value)`，**不套前缀**（`NullableConverter::EncodeAuto`）。所以
   `List<int?>{null, 5}` = `06 | 00 | 01 05000000`。
-- **Rust 改前**：`Option` 只实现了 `encode` / `decode`，`auto` 走默认路径 → 因为
-  `LEN = 0`（变长）而套上 anchor 前缀 → `05 0105000000`。这个 wire **C# 解不了**
-  （把 `05` 当 tag，直接 invalid tag），属于真不兼容，不只是宽度差异。
-
-改法：像 tuple 一样 override `encode_auto` / `decode_auto`（tag + `auto`，无前缀），
-`encode` / `decode` 用 raw value。named 成员仍带前缀（`05 | 01 05000000`），
-因为那由默认 `encode_with_prefix` 提供，正是 C# `EncodeWithLengthPrefix` 的行为。
+- **Rust**：`Option` 同样 override `encode_auto` / `decode_auto`（tag + `auto`，无前缀），
+  `encode` / `decode` 用 raw value。这条 override 是必需的：`Option` 的 `LEN = 0`，走默认
+  路径就会套上 anchor 前缀写出 `05 0105000000`，而这个 wire **C# 解不了**（把 `05` 当 tag，
+  直接 invalid tag）——不是宽度差异，是真不兼容。
+- named 成员仍带前缀（`05 | 01 05000000`）：那由 `encode_with_prefix` 提供，正是 C#
+  `EncodeWithLengthPrefix` 的行为。
 
 回归：`vec_i32opt`、`vec_i32opt_none`、`named_with_opt_none`、`named_with_opt_some`
 四条 fixture 钉死这四种场景。
 
 ---
 
-## 13. 与 C# / C++ 的功能覆盖对照（更新至 2026-11-08）
+## 13. 与 C# / C++ 的功能覆盖对照
 
 图例：✅ 有且对齐 · ⚠️ 部分 · ❌ 无。
 
@@ -1709,16 +1498,16 @@ TFM 共用，条件行会破坏「表 == 语料」。`fsharp.tsv` 因此保留�
 |流式 / Brotli|✅|❌|❌|有意不做（§6）|
 |no_std|—|—|✅|Rust 侧唯一超出两实现的能力|
 
-### 13.1 优先级（为什么是这个顺序）
+### 13.1 为什么是这个顺序
 
-1. ~~**fixture + anchor 阈值**（§12）~~ ✅ 已完成：不先钉住字节，后面每加一个类型都要重新怀疑 wire。
-2. ~~**enum + tuple object**~~ ✅ 已完成（§14）：wire 最简单、两实现都有、derive 已有骨架。
-3. ~~**`union` / `variant`**~~ ✅ 已完成（§16）：derive 的最后一个形态，wire 直接复用
+1. **fixture + anchor 阈值**（§12）：不先钉住字节，后面每加一个类型都要重新怀疑 wire。
+2. **enum + tuple object**（§14）：wire 最简单、两实现都有、derive 已有骨架。
+3. **`union` / `variant`**（§16）：derive 的最后一个形态，wire 直接复用
    tuple object 规则 + 一个紧凑整数 tag。
-4. ~~**指针与容器**~~ ✅ 已完成（§19.13 / §19.14）：`Box` / `Rc` / `Arc` 解除递归阻塞，
-   八个标准容器全部落地，零新增依赖。`with` / `borrow` 现在是第一优先级。
-5. ~~**`with` / `borrow`**~~ ✅ 已完成（§19.17）：功能补齐，不阻塞别人；wire 不变，无新增公开 API。
-6. **benchmark + 四项性能优化**：硬规矩是先基准，没有数据不动代码。
+4. **指针与容器（P1）**（§19.13 / §19.14）：`Box` / `Rc` / `Arc` 解除递归阻塞，
+   八个标准容器全部落地，零新增依赖。
+5. **`with` / `borrow`**（§19.17）：wire 不变，无新增公开 API。
+6. **benchmark + 性能优化**：硬规矩是先基准，没有数据不动代码。
 
 ### 13.2 规模对照（判断「还差多少」的参照）
 
@@ -1731,7 +1520,7 @@ TFM 共用，条件行会破坏「表 == 语料」。`fsharp.tsv` 因此保留�
 
 ---
 
-## 14. 已实施：tuple object / enum(int) / derive 静默错误（2026-11-07）
+## 14. tuple object / enum(int) / derive 的静默错误
 
 ### 14.1 tuple object 不是「每个成员都带前缀」
 
@@ -1770,25 +1559,25 @@ Rust 侧：
 |非 ASCII `rename` 产出 `b"名字"` → 非法字节串|反转义成字节后 `Literal::byte_string`，`rename = "名字"` → `b"\xe5\x90\x8d\xe5\xad\x97"`|
 
 顺带：`enum` / `union` / tuple struct / 泛型都换成了具体消息，不再是「expected struct」。
-这三条错误信息当时靠手工验证（临时 crate + `cargo build`）；现已全部纳入 §15 的快照。
+这三条错误信息由 §15.2 的 compile-fail 快照钉住。
 
 这一轮新增的 4 条 fixture（`tupleobj_two_int`、`tupleobj_int_str`、`enum_green`、`vec_enum`）
 全部落在 `same` 桶——即与真实 C# 逐字节相等。
 
 ---
 
-## 15. 已实施：派生宏诊断定位 + 负向测试（2026-11-07）
+## 15. 派生宏诊断定位与负向测试
 
-### 15.1 两个缺陷的根因
+### 15.1 为什么诊断必须带原始字节与 span
 
-**文案泄漏内部表示**。`Field.wire` 存的是 `b"..."` 字面量**源码文本**，直接 `{}` 拼进错误消息，
-于是 `rename = "x"` 冲突时用户看到 `duplicate wire name b"x"`。改成存原始字节
-（`Vec<u8>`）：生成代码时才用 `Literal::byte_string` 还原成字面量，诊断时用
-`str::from_utf8` 后 `{:?}` 渲染成 `"x"`（非 UTF-8 才退回 `b"\xff"`）。
+两条规则：**错误文案只写用户写下的名字，不写内部表示**；**caret 指向出错的 token，
+不是 `#[derive(...)]`**。
 
-**所有错误都指向 `#[derive(...)]`**。tokenizer 把 `TokenTree` 拍平成
-`Tok::{Ident, Literal, Punct, Group}` 时把 `Span` 丢了，`compile_error!` 只能用
-`call_site()`。现在：
+`Field.wire` 存原始字节（`Vec<u8>`），不存 `b"..."` 字面量的源码文本。生成代码时才用
+`Literal::byte_string` 还原成字面量，诊断时用 `str::from_utf8` 后 `{:?}` 渲染成 `"x"`
+（非 UTF-8 才退回 `b"\xff"`），所以 `rename = "x"` 冲突时看到的是 `duplicate wire name "x"`。
+
+tokenizer 把 `TokenTree` 拍平成 `Tok` 时保留 `Span`：
 
 ```rust
 enum Tok {
@@ -1816,11 +1605,10 @@ struct Error { msg: String, span: Span }   // 取代裸 String
 |空结构体 / 空枚举|花括号|
 |泛型结构体 / 枚举|类型名|
 
-**去重是白捡的**：`Encode` 与 `Decode` 各自独立解析，都会报同一个错。以前两条 span 不同
-（分别指向 `Encode` 和 `Decode`），用户看到两条重复错误；现在 span 与文案完全相同，
-rustc 直接合并成一条。
+**去重是白捡的**：`Encode` 与 `Decode` 各自独立解析，同一个错会报两次，但两边 span 与文案
+完全相同，rustc 直接合并成一条。
 
-### 15.2 compile-fail fixture（当时 23 个，现 29 个）
+### 15.2 compile-fail fixture（29 个）
 
 `crates/binary-tests/tests/ui.rs`：
 
@@ -1863,7 +1651,7 @@ rustc 自己的语法错误——真少逗号时 rustc 的 parser 先失败，�
 - 代价：21 个第三方 crate（`serde` 家族、`toml` 家族、`glob`、`termcolor`、`target-tuple`
   及传递依赖）、约 2 MB 源码、~9 s 冷启动；新机器第一次 `cargo test` 需要联网。
 - 版本**不钉死**（`trybuild = "1"`）。`compile_fail` 这个调用面是稳的；而 `.stderr`
-  快照钉的是 **rustc** 渲染出来的文本（本目录 23 个快照里没有一个含 trybuild 自己画的
+  快照钉的是 **rustc** 渲染出来的文本（本目录 29 个快照里没有一个含 trybuild 自己画的
   `┈` 边框），所以钉 trybuild 只钉住了漂移里较小的一半，真正的变量是 rustc 版本。
   升级后若渲染有变，测试会带着 diff 失败而不是静默放过：看 diff，再
   `TRYBUILD=overwrite` 重生成。`.gitignore` 忽略 `Cargo.lock`（库工作区惯例），
@@ -1871,7 +1659,7 @@ rustc 自己的语法错误——真少逗号时 rustc 的 parser 先失败，�
 
 ---
 
-## 16. 已实施：`#[binary(union)]` 标记联合（2026-11-07）
+## 16. `#[binary(union)]` 标记联合
 
 ### 16.1 wire 契约（三边一致的源码依据）
 
@@ -1886,7 +1674,7 @@ rustc 自己的语法错误——真少逗号时 rustc 的 parser 先失败，�
 |:---|:---|:---|
 |C#|`Converter::Encode(ref Allocator, int)` → `NumberModule::EncodeLength`（`n >> 7 == 0` → 1 字节，否则 4 字节大端 + bit31）|`Converter::Encode` / `NumberModule::EncodeLength`|
 |C++|`::binary::Encode(Allocator&, size_t)` → `EncodeLengthPrefixLength` + `EncodeLengthPrefix`|`ConverterExtensions.cpp:Encode`|
-|Rust|`Encoder::write_compact_int` / `Decoder::read_compact_int`，复用 `prefix_header_len` + `encode_prefix_wide` / `decode_prefix`|`encoder.rs:write_compact_int` / `decoder.rs:read_compact_int`|
+|Rust|自由函数 `binary::encode` / `binary::decode`，复用 `prefix_header_len` + `encode_prefix_wide` / `decode_prefix`|`converter.rs:encode` / `decode`|
 
 也就是说「tag 编码」与「长度前缀编码」在三条实现里是**同一个函数的不同名字**。
 `test_compact_int_width` 钉住 127/128 这个宽度拐点（`80 00 00 80` = 128 | bit31）。
@@ -1915,7 +1703,7 @@ payload 完全复用 tuple object 规则（§11 / §14.1）：
 - named 成员位置仍然带前缀，因为那是框架给的：`write_named_member` 调 `encode_with_prefix`，
   默认实现是 anchor over `encode`，与 C# `EncodeWithLengthPrefix` 的 anchor 路径一致。
 
-**实测（2026-11-09，三边真实实现）**。同一组形状，单元格是 `auto / raw`
+**三边真实实现实测**。同一组形状，单元格是 `auto / raw`
 （`EncodeAuto` / `Encode`）：
 
 |形状|C# `[Union]`|F# DU|C++ `std::variant`|Rust|
@@ -1960,7 +1748,7 @@ C# 与 C++ 的 `Dot` 走的是**手写 converter**，不是库生成的：那两
 |变体成员属性|编译错误|成员位置化且全量编码，`rename` / `optional` / `skip` 无意义|
 |结构体变体 `V { a, b }`|支持，按声明顺序位置化|C# union case 的多字段就是这么写的（`MakeBody` 遍历 `GetFields()`）|
 |`Layout::LEN`|恒 `0`|tag 宽度随变体序号变（`0..=127` 一字节），C# `UnionConverter` 也是变长|
-|`Option` 的 tag 错误|统一为 `Error::InvalidTag(u32)`|原来是 `Message("invalid Option tag")`，丢掉了具体值|
+|tag 错误的形状|`message(format_args!("invalid option tag: {tag}"))`|保留具体值，文本与 union 的 `invalid union tag` 同形；不占变体（§18.4）|
 |冲突的布局模式|编译错误|`#[binary(tuple, union)]` 以前是后者胜出，静默得离谱|
 
 ### 16.3 新增用例（7 个，`crates/binary-tests/tests/derive.rs`）
@@ -1971,7 +1759,7 @@ C# 与 C++ 的 `Dot` 走的是**手写 converter**，不是库生成的：那两
   （`[02, 01 00 00 00, 01 'x']` vs `[02, 01 00 00 00, 'x']`）。
 - `test_union_round_trip` —— auto / raw 两条路径都幂等。
 - `test_union_in_vec` —— 变长元素集合（anchor 路径）里能恢复元素个数。
-- `test_union_invalid_tag` —— tag 7 报 `InvalidTag(7)`，不产生别名。
+- `test_union_invalid_tag` —— tag 7 的文本是 `invalid union tag: 7`，不产生别名。
 - `test_union_as_named_member` —— named 成员位置的前缀由框架给：
   `09 | 05 "shape" | 02 | 02 'a'`。
 - `test_union_edge_shapes` —— `Nothing()`（空元组变体）等价 unit；`Pairs(Vec<(i32, i32)>)`
@@ -1985,14 +1773,13 @@ C# 与 C++ 的 `Dot` 走的是**手写 converter**，不是库生成的：那两
 为此 `Tok::Punct` 现在也携带 `Span`（原先只有 `Ident` / `Literal` / `Group` 带），
 否则 `B = 5` 的 caret 只能落在 derive 上——`Error::at` 拿到的是 `Span::call_site()`。
 
-### 16.4 仍然存在的缺口
+### 16.4 已知边界
 
-- ~~**union 的跨语言语料**~~ ✅ 已补全（2026-11-09，含 unit 用例）。三边都实测过
-  （§16.1 的表）：F# `UnionConverter`、C# `[Union]`（`union` 关键字与 `[Union]` + `IUnion`
-  两条声明方式最终拿到的是同一个反射 `UnionConverter`，字节也相同）、C++ `std::variant`。
-  五条语料（`union_dot` / `union_circle` / `union_text` / `union_rect` / `union_pair`）落在
-  三张表里，tag 与 payload 全部逐字节相同。
-  `Dot` 在 C# / C++ 上的 converter 是**手写**的（用户 2026-11-09 指出），这不构成「自造参考
+- **union 的跨语言语料齐全**（含 unit 用例，§16.1 的表）：F# `UnionConverter`、C#
+  `[Union]`（`union` 关键字与 `[Union]` + `IUnion` 两条声明方式最终拿到同一个反射
+  `UnionConverter`，字节也相同）、C++ `std::variant`。五条语料（`union_dot` / `union_circle`
+  / `union_text` / `union_rect` / `union_pair`）落在三张表里，tag 与 payload 全部逐字节相同。
+  `Dot` 在 C# / C++ 上的 converter 是**手写**的，这不构成「自造参考
   实现给自己作证」：
   - 缺的不是 union 逻辑，而是一个**零字节类型的 converter**。tag 的写法、`auto` / raw 的
     payload 分流、非法 tag 的报错，仍由库的 `UnionConverter` / `VariantConverter` 产生；
@@ -2012,36 +1799,34 @@ C# 与 C++ 的 `Dot` 走的是**手写 converter**，不是库生成的：那两
   - 库仍然不自带零成员类型的 converter，所以两张表的探针里各有一段手写代码（§12.5）。
     那是**语料生成器**的一部分，不是库的能力；但 C# 的注册走的是库的公开机制，不是绕过它。
   Rust 侧的 unit 形态另由 `tests/derive.rs::test_union_tag_wire` 钉住（`[0x00]`）。
-- **两变体 union ≡ `Option<T>`（wire 等价，2026-11-09 钉住）**：`None`/unit 变体同写 `00`、
+- **两变体 union ≡ `Option<T>`（wire 等价）**：`None`/unit 变体同写 `00`、
   `Some(v)`/单字段变体同写 `01` + auto(v)，`tests/derive.rs::test_union_two_variants_match_option`
   逐字节断言并双向互解（定长 `i32` 与变长 `String` 两种 payload）。等价是**钉住的巧合**而非共享
   实现：`option.rs` 写定宽 1 字节 tag，derive 写 compact int，重合只在 compact int 的单字节
   区间（union 第 129 个变体起 tag 变宽，`Option` 不会）。
-- ~~**递归 union**~~ ✅ 已解决（2026-11-08，§19.13）：`Box<T>` 落地后，
-  `enum Tree { Leaf(i32), Node(Box<Tree>, Box<Tree>) }` 可 derive 并 round-trip，
-  由 `tests/smart_ptr.rs::test_recursive_union_round_trip` 钉住。仍无跨语言 fixture。
+- **递归 union 可 derive**（§19.13）：`Box<T>` 存在，所以
+  `enum Tree { Leaf(i32), Node(Box<Tree>, Box<Tree>) }` 可 derive 并 round-trip，由
+  `tests/smart_ptr.rs::test_recursive_union_round_trip` 钉住。仍无跨语言 fixture。
 
-## 17. `no_std` / `alloc` / `std` 的分层评估（2026-11-07）
+## 17. `no_std` / `alloc` / `std` 分层
 
-### 17.1 当时的账：`std` feature 只 gate 了一行（2026-11-07 快照）
+### 17.1 `std` feature 的实际面积
 
 ```rust
-// lib.rs（这两行现在仍然如此）
+// lib.rs
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
-// error.rs（当时的写法；现在是无 cfg 的 `impl core::error::Error for Error`，见 §18.7）
 #[cfg(feature = "std")]
-impl std::error::Error for Error {}
+pub mod collections;   // HashMap / HashSet 是唯一被 std 挡住的东西（§19.14）
 ```
 
-当时全 crate 只有 3 处 `cfg`（`lib.rs` 2 处、`error.rs` 1 处）。`std` 在 §19.14 落地后
-`collections.rs` 另有 10 处 `#[cfg(feature = "std")]`，现状见 §17.5。也就是说：
+全 crate 与 `std` 有关的 `cfg` 只有这些：`lib.rs` 的 `no_std` 开关与 `collections` 模块，
+加上 `collections.rs` 里 9 处 `#[cfg(feature = "std")]`。`Error` 的
+`core::error::Error` impl 不需要 `cfg`（§18.2）。
 
-- 当时「no_std」的准确说法是 **`no_std + alloc`**：`Vec` / `String` / `&str` / `[T; N]` 全都在，
-  被 `std` 挡掉的只有 `Error` 的 `std::error::Error` impl 这一处；`HashMap` / `HashSet` 是
-  后来才进 `std` gate 的（§19.14）。
-- `cargo build -p binary --no-default-features` 一直通过，维护成本约等于 0。
+- 「no_std」的准确说法是 **`no_std + alloc`**：`Vec` / `String` / `&str` / `[T; N]` 全都在。
+- `cargo build -p binary --no-default-features` 通过，维护成本约等于 0。
 
 ### 17.2 收益有多大
 
@@ -2051,12 +1836,12 @@ impl std::error::Error for Error {}
 |:---|:---|:---|
 |常规 std 应用|✅|默认 feature，无需配置|
 |`no_std` + 有分配器（embassy / esp-idf / UEFI / 内核模块 / no_std wasm）|✅|现在就能用，无需改代码|
-|裸机无分配器|⚠️|用不了：`Encoder` 的 `Owned` 后端与 `finish() -> Vec<u8>` 都要求 alloc|
+|裸机无分配器|⚠️|用不了：`Allocator` 的 `Owned` 后端与 `finish() -> Vec<u8>` 都要求 alloc|
 
 所以 `no_std` 是「顺带就有」，成本接近 0；**代价不在维护，而在 API 形状**：只要保留
-`Encoder::new()` / `finish() -> Vec<u8>`，就永远绑死 alloc，无分配的目标也就永远差一步。
+`Allocator::new()` / `finish() -> Vec<u8>`，就永远绑死 alloc，无分配的目标也就永远差一步。
 哪天真要支持裸机，做法是加一层 `alloc` feature，把 `Backing::Owned`、`Vec`/`String` 的 impl
-和 `finish()` 移出去，让 `Encoder::on_slice` 成为唯一入口——估计 12 处改动，仍不需要拆 crate。
+和 `finish()` 移出去，让 `Allocator::on_slice` 成为唯一入口——估计 12 处改动，仍不需要拆 crate。
 
 ### 17.3 扩展「标准库常见类型」的代价：几乎都不需要 `std`
 
@@ -2073,10 +1858,9 @@ impl std::error::Error for Error {}
 |`Cow<'a, T>`|`alloc`|✅ wire 透明、解码恒 Owned（§19.14）|
 |`HashMap` / `HashSet`|`std`|✅ `#[cfg(feature = "std")]`（§19.14）|
 
-**订正（2026-11-08，§19.14）**：原文这里写的「先写元素个数，再逐个 `auto`」**是错的**。
-三边都不写元素个数 —— C++ `ContainerConverter::Encode` 只是 `for (auto& i : item)
-converter->EncodeAuto(...)`，C# `EnumerableEncoder` / `DictionaryEncoder` 同样只铺元素，
-解码侧都是 `while (span 非空) DecodeAuto(...)`。边界来自外层长度前缀；定长元素由
+**容器不写元素个数**（§19.14）。三边都只铺元素 —— C++ `ContainerConverter::Encode` 是
+`for (auto& i : item) converter->EncodeAuto(...)`，C# `EnumerableEncoder` /
+`DictionaryEncoder` 同样只铺元素，解码侧都是 `while (span 非空) DecodeAuto(...)`。边界来自外层长度前缀；定长元素由
 `Layout::LEN` 从 payload 长度反推个数，变长元素靠自身前缀自分隔。容器 raw payload 与
 `Vec<T>` 完全相同。
 
@@ -2110,454 +1894,115 @@ converter->EncodeAuto(...)`，C# `EnumerableEncoder` / `DictionaryEncoder` 同�
    加 `HashMap` / `HashSet` 的 impl、**`derive`** = proc-macro。初稿写过一个独立的 `alloc`
    feature，但 `Cargo.toml` 从未引入它：`alloc` 是「无 feature 时也成立」的基线，不是一层
    开关。`std` 在 §19.14 落地后才名副其实（此前只 gate 一行 `#![no_std]`）。错误的 trait
-   impl 已从 `std::error::Error` 换成 `core::error::Error`（§18.7），两端 `source()` 都可用。
+   impl 已从 `std::error::Error` 换成 `core::error::Error`（§18.2），两端 `source()` 都可用。
 3. **`no_std` 只承诺 `no_std + alloc`**，不承诺裸机。这句要写进 README，避免「支持 no_std」
    被读成「无分配」；无分配是另一个决策，届时加 `alloc` feature 仍然不拆 crate。
 
-## 18. 错误处理：自定义类型的错误如何到达顶层（2026-11-07）
+## 18. 错误模型：五个变体 + 两条降级通道
 
 ### 18.1 约束：trait 签名里没有位置放 `E`
 
-`Encode::encode` 和 `Decode::decode` 都返回 `binary::Result<T>`，也就是
-`Result<T, binary::Error>`。签名里没有类型参数，所以一个自定义 impl 不能
-`return Err(MyError::BadVersion)`。这是三个方案比较后的选择，不是疏漏。
+`Encode` / `Decode` 都返回 `binary::Result<T>`，签名里没有类型参数，所以自定义 impl 不能
+`return Err(MyError::BadVersion)`。
 
-### 18.2 三条候选路线
+|方案|代价|
+|:---|:---|
+|泛型错误 `Encode<E = Error>`|每个调用点、每个容器 impl、每段 derive 代码都要带参数并转发；wire 只有一种，serde 那套「一个 trait 服务多种格式」的收益在这里为零|
+|单一装箱通道 `Message(Box<dyn Error>)`|丢掉 `PartialEq` / `Clone`，而 `assert_eq!(err, Error::NotEnoughBytes)` 是调用方唯一稳定的断言方式|
+|**闭合枚举 + 两条降级通道**|默认路径丢掉原始类型（只剩文本）；要类型就显式选 `wrapped`，付一次 `Arc`|
 
-|方案|形态|代价|
-|:---|:---|:---|
-|泛型错误|`Encode<E = Error>` / `Decode<'de, E = Error>`|每个调用点、每个容器 impl、每段 derive 生成代码都要带 `E`；`Vec<T>` / `Option<T>` / tuple 的 impl 全部要加参数并转发。serde 这么做是因为一个 trait 要服务多种 wire 格式，这里 wire 是固定的，收益为零|
-|装箱擦除|`Error::Message(Box<dyn Error + Send + Sync>)`|失去 `PartialEq` / `Eq` / `Clone`，每个错误一次堆分配；`assert_eq!(err, Error::InvalidTag(7))` 这类断言直接写不出来|
-|**闭合枚举 + 边界降级**|默认：11 个变体，`Message(Cow<'static, str>)`；可选 `Wrapped(ErasedError)`（§18.7）|默认路径丢失原始错误类型，只剩 `Display` 文本；要类型就显式选 `wrapped`|
-
-采用第三个。判据是「顶层调用方到底需要什么」：需要的是**能 match 的变体**和
-**能打印的上下文**，不是原始错误的类型身份。`PartialEq` / `Clone` 是前者的前提，
-所以 `Box<dyn Error>` 不能当**唯一**通道。
-
-> 2026-11-07 追加：判据只否掉了「唯一通道」，没否掉「并排变体」。同日加了
-> `Error::Wrapped(ErasedError)`，把装箱做成**显式可选项**而不是默认代价，见 §18.7。
-> 下表第 3 行因此读作「默认路径」。
-
-### 18.3 三种落地写法
-
-**（a）`From` + `?`：impl 内部降级。** `impl From<MyError> for binary::Error` 在
-orphan rule 下合法（`MyError` 是本地的），于是 impl 里可以直接 `?`：
+### 18.2 五个变体
 
 ```rust
-impl From<OutOfRange> for Error {
-    fn from(e: OutOfRange) -> Self { Error::message(e) }
-}
-
-impl Encode for Count {
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        check_count(self.0)?;   // OutOfRange -> Error::Message
-        e.write_byte(self.0)
-    }
+#[derive(Debug, Clone)]
+pub enum Error {
+    BufferFull,
+    NotEnoughBytes,
+    LengthTooLarge,
+    Message(Cow<'static, str>),
+    Wrapped(Arc<dyn core::error::Error + Send + Sync + 'static>),
 }
 ```
 
-**（b）就地降级。** 没有自己的错误类型时直接
-`map_err(Error::message)` / `Error::message_static("...")`。
+划分标准只有一条：**调用方能对这种失败做出不同的事吗**。
 
-**（c）外层包装：需要保留原始错误时。** 错误穿不过 trait，但可以在调用边界重建：
+|变体|存在理由|
+|:---|:---|
+|`BufferFull`|写侧边界：扩大缓冲、重试。唯一可恢复的失败，只有借用后端会产生|
+|`NotEnoughBytes`|读侧边界；解码最常见的失败。短头、短载荷、短元素一视同仁|
+|`LengthTooLarge`|长度前缀的 31 位上限；所有构造点都在写入前拦截，不产生半截 wire|
+|`Message(Cow)`|降级通道一：文本。`Borrowed` 零分配（crate 自己的路径），`Owned` 一次分配（外部错误）|
+|`Wrapped(Arc<dyn Error>)`|降级通道二：保留类型。可 `downcast_ref`，`source()` 链可穿，变体直接给出 `Arc`|
+
+`Wrapped` 用 `Arc` 而非 `Box` 是为了 `Clone`；`Send + Sync + 'static` 是为了 `Error` 本身满足
+这两个 bound（`no_std` 下写作 `core::error::Error`）。不能 `Send` 的源错误只能用 `message`
+降级。`Arc` 也让调用方能复用已有的分配：直接构造变体即可，不必经过 `Error::wrapped`。
+
+### 18.3 降级：怎么选
 
 ```rust
-enum AppError { Wire(binary::Error), Mine(OutOfRange) }
-let v = MyType::decode(&mut d).map_err(AppError::Wire)?;
+Error::message_static("invalid UTF-8")        // 静态文本，零分配
+Error::message(format_args!("tag {n}"))       // 动态文本，一次分配
+Error::wrapped(my_error)                      // 保留类型，一次 Arc
 ```
 
-**（d）`Error::wrapped`：让类型自己穿过去（§18.7）。** 降级时选 `wrapped` 而不是
-`custom`，调用方拿 `downcast_ref` 就能把 `OutOfRange` 取回来，外层 enum 只剩「区分 wire 与
-领域」的作用。
+crate 内部只用前两种。`impl From<MyError> for Error` + `?` 是最短的降级写法；领域校验放在
+impl 外层的建议不变——impl 只做 wire 转换，自己的错误类型在外层降级。
 
-**由此得出一条 API 设计规则**：impl 里只做 wire 转换，领域校验放到外层。§18.7 之后这条
-规则收窄成——**降级必须显式选**：默认的 `custom` 丢掉类型，`wrapped` 保留类型但付一次分配，
-不选就等于选了「只剩字符串」。
+**降级必须显式选**：不选就等于选了「只剩字符串」。
 
-encode 与 decode 两侧完全对称，没有单独的机制。
+相等语义（手写 `PartialEq` / `Eq`，集中在 `error.rs`）：三个守卫变体逐一相等；`Message` 按
+内容（构造方式不影响断言，`Owned("x") == Borrowed("x")`）；`Wrapped` 按 `Display` 文本（没有
+type id 可比，无关类型打印相同即相等——这是接受下来的后果）；跨臂一律 false。
+`source()`：`Message` 与三个守卫变体为 `None`，`Wrapped` 为内层。
 
-### 18.4 `Message` 从 `&'static str` 改成 `Cow<'static, str>`
+### 18.4 具体错误不占变体
 
-旧类型连动态消息都放不下：只能写 `Error::Message("bad version")`，把 `9` 丢掉。
-现在：
+值特定的失败与调用方自己的错误同等待遇：
 
-- `Error::message_static(&'static str)` → `Cow::Borrowed`，**不分配**，crate 自己的路径和
-  derive 生成代码都用它；
-- `Error::message(impl Display)` → `Cow::Owned(format!("{msg}"))`，一次分配，用于外部错误。
-
-`PartialEq` 对 `Cow` 比较的是内容，所以 `Message(Owned("x")) == Message(Borrowed("x"))`——
-构造方式不影响断言，这一点也有测试。
-
-`core::error::Error::source()` 对 `Message` 返回 `None`（payload 是消息，不是 boxed error），
-对 `Wrapped` 返回内层（§18.7）；trait impl 本身已不挂 `std` feature，见 §18.7.4。
-
-### 18.5 位置：不放进 `Error`，靠游标折算
-
-把 `offset` 放进错误要么把 enum 改成 struct，要么给 11 个变体各加字段，
-现有全部 `assert_eq!(err, Error::X)` 都会失效；何况长度前缀作用域里同时存在
-「payload 内偏移」和「绝对偏移」两套坐标，存哪个都要额外约定。
-
-改成让 `Decoder` 的游标在失败后仍然有意义——但**不导出绝对位置**，只导出「还剩多少」：
-
-- `take` 失败不改游标，停在**请求起点**；
-- `with_prefix` 失败时把子游标的相对位置折回父坐标（`self.pos = start + sub.pos`）；
-  每层都折，所以最外层拿 `buf.len() - d.remaining()` 就是失败字节的绝对偏移；
-- 成功路径不受影响（仍然 `self.pos = end`）。
-
-`position()` 一度存在，后来删了（2026-11-07）：它在顶层是绝对值、在 `with_prefix` /
-named payload 里是作用域相对值，同一个名字两种含义；而它的信息从来不是私有的——持有原始
-buffer 的调用方一次减法就能还原。C#（`ref ReadOnlySpan<byte>`）和 C++（`std::span`）把
-cursor 放在 span 里，"我在哪" 天生是 `total - remaining`，连一个位置方法都不需要。
-
-**已知缺口**：`NamedMembers::value` 用 detached payload 建 `Decoder::new(payload)`，
-子游标没有折回，derive 生成的 named object 成员解码失败时，报出的偏移是「成员内坐标」，
-外层 `remaining()` 不随成员前进。逃生口是自定义 impl 自己拼相对距离：
-
-```rust
-let start = d.remaining();
-let n = d.take_byte()?;
-if n > 4 {
-    return Err(Error::message(format_args!(
-        "count {n} out of range {} byte(s) into the value",
-        start - d.remaining()
-    )));
-}
-```
-
-### 18.6 用例（`crates/binary-tests/tests/errors.rs`，15 个）
-
-|用例|钉住的性质|
+|失败|现在的形态|
 |:---|:---|
-|`test_from_impl_makes_question_mark_work`|`From` + `?` 在 encode / decode 两侧都产生 `Error::Message`，消息是 `Display` 输出|
-|`test_message_shape_static_vs_allocated`|`message` → `Cow::Owned`、`message_static` → `Cow::Borrowed`，且两者相等|
-|`test_degraded_error_cannot_be_recovered`|`message` 降级后只能 match 到 `Message`；外层包装能区分两侧|
-|`test_failure_offset_folds_through_nested_prefixes`|两层 `with_prefix` 内失败，`buf.len() - d.remaining()` = 3（buffer 末尾）|
-|`test_offset_reported_from_inside_a_custom_impl`|impl 内用 `start - d.remaining()` 报相对距离，调用方一次减法得绝对偏移|
-|`test_wrapped_error_keeps_type_and_source_chain`|`wrapped` 后 `Display` 委派给载荷、`source()` 可取回载荷、载荷自身的 chain（`BadFrame → Checksum`）仍通、`downcast_ref` 拿到原类型、`Error` 保持 `Send + Sync + 'static`、`clone` 后仍能 downcast|
-|`test_wrapped_equality_is_textual`|两个无关类型文本相同即相等（`BadFrame(7)` == `Impostor`）；同类型不同载荷不等；`Wrapped` 与 `Message` 不互相相等；`Message` 仍按内容比较|
-|`test_wrapped_error_crosses_the_trait_boundary`|`From<BadFrame> for Error` 用 `wrapped`，impl 内 `?` 之后调用方仍能 downcast 到 `BadFrame(2)`，且正常路径不受影响|
+|负载被前缀声明但不存在|`NotEnoughBytes`（与短头同一形状；不为流式重试保留第二种短读）|
+|元素载荷不是 `LEN` 的整数倍|`message_static("misaligned element payload")`|
+|named object 成员重名|`message_static("duplicate named member")`|
+|成员名查表返回越界索引|`message_static("invalid member index")`（内部不变量被破坏）|
+|`Option` / union 的 tag 非法|`message(format_args!("invalid option tag: {tag}"))` / `"invalid union tag: ..."`|
+|缺失必需成员|`message(format_args!("missing required member: {name}"))`|
+|非 UTF-8 的 `String` / `str`|`message_static("invalid UTF-8")`|
 
-上表是降级路径的 8 个；另外 7 个（`test_truncated_payload_is_not_a_short_read` 等）钉的是
-变体语义而非降级路径，列在 §18.9.4。
+文本与 C# `ThrowHelper` 的对应句逐字对齐，跨语言可以按消息 grep。
 
-`error.rs` 上还有 4 个 doc test（`Error::message` 的 `From` 示例与位置示例、
-`Error::wrapped` 的 `?` + downcast 示例、`ErasedError::inner` 的取回示例）。
+### 18.5 位置：不放进 `Error`
 
-### 18.7 追加：`Wrapped` 变体，把装箱做成可选项（同日晚）
+读侧游标是 `&mut &[u8]`，所有原语「成功才前进」，失败后游标停在失败项起点，
+`总长 - buf.len()` 就是偏移；嵌套载荷是同一 buffer 的子切片，不存在两套坐标。`position()`
+这类方法因此不提供：能解释绝对值的人必然持有原始 buffer，一次减法就够；C# / C++ 把 cursor
+放在 span 里，也没有位置方法。
 
-"custom 不能是 `dyn Error` 吗"——能，而且不必牺牲已有的派生。做法不是把 `Message` 改成
-`Box<dyn Error>`，而是**并排加一个变体**，让调用方在降级点显式选择付不付这笔代价。
+`from_slice` 是例外场景：它拿到独立切片，失败时连「值从哪开始」都没有上下文，错误里只报
+文本——与 C# `Generator.Decode(byte[])` 的位置信息量相同。
 
-#### 18.7.1 形态
+### 18.6 不加 `#[non_exhaustive]`
 
-```rust
-pub struct ErasedError(Arc<dyn core::error::Error + Send + Sync + 'static>);   // 16 字节
+变体集合按政策封闭：具体错误永远走 `Message` / `Wrapped`，「将来加变体」这个动作不存在，
+属性失去保护对象，而 `match` 的穷尽性对调用方有价值。新失败先问「调用方能对它做不同的
+事吗」——不能就不加变体。兼容性由这条政策保证，不由属性保证。
 
-pub enum Error { …, Message(Cow<'static, str>), Wrapped(ErasedError) }
+### 18.7 用例
 
-impl Error {
-    pub fn wrapped(err: impl core::error::Error + Send + Sync + 'static) -> Self { … }
-}
-```
+`crates/binary-tests/tests/errors.rs` 按性质分组钉住契约：
 
-`Error` 仍是 24 字节：`Wrapped` 载荷 16 < `Cow<str>` 载荷 24，枚举大小由最大变体决定，
-加变体没有让错误值变胖。`match` 只有 `Display` 一处是穷尽的，编译器强制补分支；
-`source()` 与 `PartialEq` 都不用改结构。
-
-#### 18.7.2 为什么是 `ErasedError` 这个 newtype，而不是裸 `Arc`
-
-裸 `Arc<dyn Error>` 不能比较，而 `Error` 必须留 `PartialEq`（否则 116 处
-`assert_eq!(err, Error::X)` 全部失效）。两条实现路径：
-
-|写法|后果|
+|组|用例|
 |:---|:---|
-|给 `Error` 手写 `PartialEq`：`match (self, other) { … _ => false }`|能编译，但**新增变体时静默错误**：新变体与自身比较会落到 `_ => false`。这是延迟爆炸的 bug，不是风格问题|
-|把「怎么比」封进 `ErasedError`，`Error` 继续 `derive(PartialEq, Eq, Clone, Debug)`|新增变体自动正确；奇怪语义只存在于 16 行之内，且有独立文档与测试|
-
-选后者。`ErasedError` 公开（`binary::ErasedError`），因为它是公开变体的字段类型，
-藏起来只会在下游产生「无法命名」的报错。
-
-#### 18.7.3 相等是文本相等——这是唯一的真代价
-
-`dyn core::error::Error` 不暴露 `type_id`（`Any::type_id` 不可达），所以没有别的可比项。
-`ErasedError::eq` 比 `Display` 输出：
-
-- `Error::wrapped(A) == Error::wrapped(B)` 只要两者打印相同文本就成立，**即使 A 与 B
-  是无关类型、或 A 的字段差异没进 `Display`**；
-- 同类型不同载荷通常不等（因为消息里有区别），但若 `Display` 不区分字段，也会误判相等；
-- 变体之间不串：`Wrapped` 永不等于 `Message`，哪怕文本一模一样；
-- 每次比较都会格式化一次（两侧各一次分配）。错误路径上无妨，热路径别拿它做分支条件。
-
-`test_wrapped_equality_is_textual` 把这四条都钉住，包括「`Impostor` 冒充 `BadFrame(7)`
-也相等」这个不体面但必须承认的结论。
-
-#### 18.7.4 顺带的三处调整
-
-1. **trait impl 从 `std` 移到 `core`**：`impl core::error::Error for Error` 不再挂
-   `feature = "std"`。1.81 起 `std::error::Error` 就是 `core::error::Error` 的再导出，
-   一份 impl 同时满足 `std` 与 `--no-default-features`，`source()` 因此在 `no_std` 下也可用。
-   `Wrapped` 的 bound 也必须是 `core::error::Error`，否则 no_std 下无法构造。
-2. **`Send + Sync + 'static`**：为的是 `Error` 自己保持 `Send + Sync`（跨线程搬运、塞进
-   `anyhow` 形状的上下文都依赖它）。代价是不接受 `!Send` 的 source（含 `Rc`、裸指针的
-   错误）——那种情况只能用 `custom` 降级成消息。
-3. **声明 MSRV**：`rust-version = "1.87"`。1.81 是 `core::error::Error` 的要求，1.87 是被
-   `container.rs` 的 `usize::is_multiple_of` 顶上去的——写了 `rust-version` 之后
-   clippy 的 `incompatible_msrv` 会主动盯住这类滑移，这正是声明它的收益。
-
-#### 18.7.5 三档怎么选
-
-|场景|用法|代价|
-|:---|:---|:---|
-|crate 内部、derive 生成代码、常量消息|`Error::message_static("…")`|零分配|
-|需要运行时细节（版本号、长度、偏移）|`Error::message(impl Display)`|一次 `String`，类型丢失|
-|调用方要按错误**种类**分支、或要打印完整 chain|`Error::wrapped(impl core::error::Error + Send + Sync)`|一次 `Arc` + 文本相等|
-
-默认仍是 `custom`：错误路径的常见需求是「打出来给人看」，`wrapped` 的分配与文本相等都不该
-让所有人一起付。
-
-### 18.8 决策记录：保留闭合枚举，整体擦除挂到 benchmark 之后（2026-11-07）
-
-决策人是用户，写在这里是为了让「为什么现在不动」和「什么条件下会动」都可查，不用三个月后
-靠回忆重推一遍。
-
-#### 18.8.1 两层理由：一层现在就能裁，一层必须实测
-
-「把整个错误模型换成 `dyn Error`」的理由分属两层，性质完全不同：
-
-|层|论点|能否现在裁定|
-|:---|:---|:---|
-|可观测性|变体可 match、可 `assert_eq!`，`InvalidTag(u32)` 与 `MissingMember(&str)` 有结构化出口；擦除后只剩 `Display` 文本，14 处预定义构造点各写一次 `format!`（现状是零分配的变体或常量）|能。这是契约问题，与性能无关|
-|代价|现状「错误大多零分配」vs 擦除后「每次失败一次 `Box`」，以及 `?` 传播会不会重装箱|当时不能，**同日已实测**：失败路径 ~5.5 ns + 1 次 16 B 分配，成功路径零差异（§19.3）|
-
-本轮只裁第一层：**保持现状**。第二层不裁——拿「感觉不贵」当理由会留下一个无法复核的结论。
-
-**判据先写死，防止事后找理由**：
-
-- 若实测显示错误路径开销可忽略（失败不在任何循环里、单次失败分配量小于一次 `format!`）→
-  代价侧不再成立，决策只剩「可观测性 vs 向后兼容」，必须重新权衡，**不能再用「零分配」挡回去**；
-- 若错误路径将来变成热点（试探式解码、named 协议重复解析同一 payload）→ 现状胜出，该候选作废，
-  并把结论写回本节。
-
-#### 18.8.2 为什么 C#/C++ 的「异常统一接口」不能照搬
-
-C#/C++ 里任何类型都能抛自己的异常，**接口签名不变**，「通用优于私有」由异常机制免费提供。
-Rust 没有异常，错误是返回类型的一部分：`decode` 只能有**一个**错误类型，「通用」必须买在别处。
-本 crate 买在「通道固定 + 边界降级」：
-
-- 通道两条：`Message` 走文本，`Wrapped` 走类型（`downcast` 可取回）；
-- 预定义变体与类型自有错误**没有等级差别**——它们都只是通道的一端，`MissingMember` 不比用户
-  的自定义错误更「官方」（用户观点，且正确）；
-- 代价是「通用」只到通道这一层：Rust 做不到「任何错误类型都自动穿过 `decode`」，除非整体擦除
-  （§18.8.5 的等价物）。
-
-#### 18.8.3 准入规则：预定义变体不是免费添加的
-
-此后每加一个变体，必须同时满足四条（进 review checklist）：
-
-1. **可达**：至少一个构造点，且在非 `#[cfg(test)]` 代码里。零构造点的变体是纯 API 负担。
-2. **可分支**：有调用方会据此改变控制流。否则用 `Message` / `Wrapped`。
-3. **自解释**：名字单独成立，不靠相邻变体解释；成对的语义用成对的词。
-4. **可演进**：新语义默认走 `Message`；确需变体时靠 `#[non_exhaustive]` 消化（§18.8.5）。
-
-#### 18.8.4 审计：11 个变体，命名问题已裁决（§18.9）
-
-变体集合在 0.1 冻结前做过一次完整审计，结论与改名方案写进 §18.9。下表是**修正后**的状态；
-「core 内构造点」一列就是「可达」这条规则的证据——除 `Message` / `Wrapped` 由调用方构造，
-其余每个变体都有真实构造点。
-
-|变体|core 内构造点|语义|
-|:---|:---|:---|
-|`BufferFull`|`Encoder::ensure_capacity`|写借用 buffer 越界（encode 侧，与 `NotEnoughBytes` 配对）|
-|`NotEnoughBytes`|6 处（`Decoder::take` / `take_byte`、`length::encode_prefix`）|读不足（decode 侧）|
-|`LengthTooLarge`|`Encoder::write_prefixed_bounded` / `write_prefixed` ×2|长度前缀超 `i32::MAX`|
-|`MissingMember(&'static str)`|`NamedMembers::require`|named 协议缺成员|
-|`DuplicateMember`|`NamedMembers::parse`|named 协议重复成员|
-|`InvalidMemberIndex`|`NamedMembers::parse`|名字查表返回的索引越界（内部不变量）|
-|`InvalidTag(u32)`|`Option<T>::decode` / `decode_auto` ×2、derive 生成代码|tag 非法（`Option` 与 union）|
-|`PayloadTruncated`|`Decoder::with_prefix`|前缀声明的负载超出可用字节|
-|`MisalignedElements`|`<Vec<T> as Decode>::decode`|剩余字节不是元素大小的整数倍|
-|`Message(Cow<'static, str>)`|crate + derive + 用户|文本通道|
-|`Wrapped(ErasedError)`|用户|类型通道|
-
-三个变体在这一轮里从「可疑」变成「确定」：
-
-1. **`LengthTooLarge` 从死变体变成真正的边界检查。** 原来它零构造点，真正卡 `i32::MAX` 的是
-   `length.rs` 的 `debug_assert!`：debug 下 panic，**release 下 `encode_prefix_wide` 照写
-   `(len as u32) | 0x8000_0000`，解码侧 `& 0x7FFF_FFFF` 得到错长度——静默写坏 wire**。
-   现在 `write_prefixed_bounded` 在写任何字节之前返回 `Err(LengthTooLarge)`；`write_prefixed` 在负载已经
-   写完之后返回同一个错误（编码器状态因此不确定，但调用方一律把错误当终止符，文档已写明）。
-   2026-11-07 收尾：`encode_prefix` / `encode_prefix_wide` 本身也改成 `Result<usize>`，
-   `debug_assert!` 全部删除，最底层不再留任何「release 下静默截断」的路径；`write_compact_int`
-   同源的 `debug_assert!` 一并换成 `LengthTooLarge`（§9.7 的 API 审计表）。
-2. **`LengthPrefixMismatch` 拆成两个。** 它同时承担「前缀声明多于可用字节」（截断）与
-   「剩余字节不是元素大小的整数倍」（错位）。两者对调用方含义不同：截断可以等更多数据再试，
-   错位说明数据本身不合法，重试没有意义。
-3. **`InvalidMemberIndex` 改名，因为原名在说反话。** 未知成员名在 `NamedMembers::parse` 里被
-   `continue` **有意跳过**（前向兼容），从不报错；唯一触发点是 `find` 返回了 `>= N` 的索引，
-   那是生成代码与常量 `N` 不一致，属于内部不变量。
-
-#### 18.8.5 用 `#[non_exhaustive]` 换「加变体不 breaking」
-
-「全 `dyn Error` 最大化向后兼容」这个判断是对的：调用方本来就不能 match，库可以任意增删内部
-错误。但它买的是**永远不 breaking**，付的是**永远不能 match**。同一条路上有个便宜得多的中间点：
-
-|方案|加变体|下游能否 match|成本|
-|:---|:---|:---|:---|
-|现状（公开 enum）|**breaking**|能，可穷尽|—|
-|加 `#[non_exhaustive]`|minor|能，必须带 `_`|一行|
-|全 `dyn Error`|永不 breaking|只能 `downcast` + `to_string()`|每次失败一次分配，丢 `PartialEq`|
-
-`#[non_exhaustive]` 的三条事实要说清：
-
-1. 只限制**外部穷尽 match**，不限制外部**构造** unit 变体，所以 `assert_eq!(err, Error::NotEnoughBytes)`
-   在测试里照旧（测试 crate 也是「下游」，但它不做穷尽 match）；
-2. 本 crate 内部不受影响，`Display` 的穷尽 match 仍在编译期受检；
-3. 代价是下游失去「编译器保证已处理所有错误」——对开放错误集合，这本来就是错觉。
-
-补一条边界：属性管的是**错误变体集合的开放性**，和 §1 的 wire 前向兼容无关。早先拿
-`TooNew` / `Versioned` 当例子，是把两件事混在了一起（§1 末已订正）：例子错，属性对。
-
-**它管什么、不管什么**（用两个 crate 实测，Rust 1.8x：一个 `enum Open {A,B}`，一个
-`#[non_exhaustive] enum Closed {A,B}`，各版本重新编译下游）：
-
-|库侧动作|`Open` 下游|`Closed` 下游|
-|:---|:---|:---|
-|写穷尽 `match`（无 `_`）|通过|**E0004 `_` not covered**|
-|加变体 `C`|**E0004**，必须改代码|通过，新变体落进 `_`|
-|把 `A` 改名成 `Alpha`|E0599|**E0599，属性不保护**|
-|删掉一个下游提过的变体|E0599|E0599|
-|`assert_eq!(e, Closed::B)` / `matches!` / 构造已有变体|—|**照旧可用**|
-
-一句话：**它只买「加变体不 breaking」，别的一分不保**。最后一行是关键——正是因为
-unit 变体仍可构造，`binary-tests`（独立 crate，也算下游）里 71 处 `Error::X` 一处都不用改。
-实测把属性临时加到 `Error` 上跑全量：**87 passed，bench 也照常编译**，改动面就是那一行。
-
-错误集合还会长（§9.1 的容器要加重复键一类），所以**已在 0.1 冻结前加上**：
-
-```rust
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Error { … }
-```
-
-**不为它写 fixture。** 起初加过一条 `tests/ui/error_non_exhaustive.rs`（下游穷尽 match、
-钉 E0004），已删除：那条快照钉的是**语言规则**而不是本库的诊断，`#[non_exhaustive]` 的语义
-由 rustc 保证，再拿 trybuild 守一遍属于重复；而它一旦因为变体增删而需要重生成，维护成本
-会落在 `tests/ui/` 那份「派生宏诊断」清单上，把两类东西混在一起。属性被误删就误删了——
-`cargo doc` 和 review 看得见，不值得为它加装置。
-
-#### 18.8.6 待办清单
-
-|项|类型|状态|
-|:---|:---|:---|
-|变体命名修正（6 条规则、5 处改名、1 处拆分、1 处接线）|代码 + 文档 + 测试|**已完成**（§18.9）|
-|`#[non_exhaustive]`|代码（一行）|**已完成**（2026-11-07）：属性在 `Error` 上，不加 fixture（理由见 §18.8.5）|
-|整体换 `dyn Error`|架构|**benchmark 已跑（§19.3）**：代价可忽略，结论见 §18.8.7|
-
-### 18.8.7 事后补记（同日，benchmark 已跑）
-
-§19.3 的实测结果推翻了 §18.8.1 里第二层的判据本身：擦除的代价只有 **~5.5 ns + 1 次分配/失败**，
-成功路径零差异。按预先写死的规则，这意味着「零分配」不再是保留 enum 的理由。结论不变，
-但理由重写为：
-
-1. **可观测性**（可 match、`InvalidTag(u32)` 与 `MissingMember(&str)` 有结构化出口）——
-   这是现在唯一还站得住的正面理由；
-2. **兼容性应该用 `#[non_exhaustive]` 买，而不是用擦除买**：前者一行、保住 match；
-   后者每次失败分配 + 文本相等（§18.8.5 的三方案表）。
-
-换句话说：benchmark 把「枚举很便宜」从**论据**降级成**事实**，而事实不构成理由；
-真正的理由是可断言性。
-
-### 18.9 错误变体命名（0.1 冻结前的一次性修正）
-
-命名不是风格问题。审计发现**三个名字在陈述错误的事实**：`UnknownMember` 只在索引越界时触发
-（未知名字是被跳过的），`LengthPrefixMismatch` 同时指「截断」和「错位」，`BoxedError` 装的是
-`Arc`。这比「不够优雅」严重——按名字写的 match 分支会走到错误的一侧。
-
-#### 18.9.1 六条规则
-
-|#|规则|反例（修正前）|
-|:---|:---|:---|
-|1|说**症状**，不猜动机|`Overflow` 与算术溢出同名，看不出是「缓冲写满」|
-|2|**一个变体一个故障**|`LengthPrefixMismatch` 一名两义|
-|3|成对错误共用一根轴|`Overflow` / `NotEnoughBytes` 不成对|
-|4|不借 std 方法名表达别的语义|`Source` 是 `source()` 的返回物，变体却是**本体**|
-|5|名字里不出现使用者等级|`Custom` 读作「用户自定义 vs 内置」，与「错误无高低」相悖|
-|6|名字与 `Display` 文本互为翻译|三处名不副实，见 §18.9.2 末列|
-
-规则 6 是其中唯一可机械检查的一条：七个无载荷变体的 `Display` 首词必须就是变体名的直译。
-`test_display_text_matches_the_variant_name` 钉住它，新增变体时若只改一边，测试会红。
-
-#### 18.9.2 改名对照
-
-|旧|新|原因|旧名与 `Display` 的对齐|
-|:---|:---|:---|:---|
-|`Overflow`|`BufferFull`|与算术溢出撞名；且它与 `NotEnoughBytes` 是写/读一对（规则 1、3）|✗ 打印 "buffer overflow"|
-|`Custom(Cow)`|`Message(Cow)`|去掉「用户 vs 内置」等级暗示；与 `Wrapped` 构成文本/类型两条通道（规则 5）|— 委派|
-|`Source(BoxedError)`|`Wrapped(ErasedError)`|`source()` 的返回物才叫 source，这个变体是**被包装的本体**（规则 4）|— 委派|
-|`UnknownMember`|`InvalidMemberIndex`|未知名字从不报错；触发点是索引越界（规则 1）|✗ 打印 "unknown member"|
-|`LengthPrefixMismatch`|`PayloadTruncated` + `MisalignedElements`|一名两义（规则 2）|✗ 打印 "does not match"|
-|`BoxedError`|`ErasedError`|newtype 里装的是 `Arc`，不是 `Box`|— 无 `Display`|
-
-构造器同步：`custom` → `message`、`custom_static` → `message_static`；`wrapped` 名称不变，
-于是「变体名 = 构造器名 = 语义」三角对齐。
-
-`custom` 这个名字的取舍值得单独记一笔：serde 的 `Error::custom` 是生态固定词，保留它更好搜。
-但这里是**变体 + 构造器**的组合，保留旧构造器会留下 `Error::custom()` 造出 `Error::Message`
-的错位，比失去检索熟悉度更糟。0.1 未发布，没有迁移成本。
-
-#### 18.9.3 顺带修掉的结构问题
-
-改名过程中有两件事必须一起做，否则名字改了、行为还是错的：
-
-1. **`LengthTooLarge` 接线**（§18.8.4 第 1 条）：`write_prefixed_bounded` 入口返回错误，
-   `write_prefixed` 在写完负载后返回错误。前者是零代价的（一次比较，分支可预测），
-   后者只可能在 >2 GiB 的消息上发生。
-2. **`LengthPrefixMismatch` 拆两个**：`decoder.rs` 的「前缀声明的负载超出缓冲区」是
-   `PayloadTruncated`；`container.rs` 的「剩余字节不是元素大小整数倍」是 `MisalignedElements`。
-
-#### 18.9.4 测试怎么钉住语义
-
-`crates/binary-tests/tests/errors.rs` 末尾新增一节，每个用例都对应一条「旧名字会给出错误答案」
-的语义：
-
-|用例|钉住的性质|
-|:---|:---|
-|`test_truncated_payload_is_not_a_short_read`|同一位置上「头被截断」→ `NotEnoughBytes`、「负载被截断」→ `PayloadTruncated`，可分别重试|
-|`test_misaligned_fixed_size_elements`|6 字节的 `Vec<i32>` → `MisalignedElements`；8 字节同一路径正常解码|
-|`test_length_beyond_i32_max_is_reported_before_writing`|`write_prefixed_bounded(MAX+1)` 返回 `LengthTooLarge` 且 `e.len() == 0`（守卫在写入之前）|
-|`test_compact_int_beyond_i32_max_is_rejected`|`write_compact_int(i32::MAX+1)` 返回 `LengthTooLarge` 且不写字节；`i32::MAX` 仍编码成 `FF FF FF FF` 并回读一致|
-|`test_unknown_name_is_skipped_but_bad_index_is_an_error`|未知名字 → `Ok`（前向兼容）；`find` 返回越界索引 → `InvalidMemberIndex`|
-|`test_display_text_matches_the_variant_name`|规则 6 的机械检查|
-
-`tests/wire.rs` 的 `test_borrowed_encoder_overflow` 同时改名为 `test_borrowed_encoder_full`，并把
-`is_err()` 换成 `assert_eq!(err, Error::BufferFull)`——改名若只改拼写不改断言，等于没改。
-
-#### 18.9.5 顺序：先改名，后 `#[non_exhaustive]`
-
-两件事都必须在 **0.1 冻结前**做完，但**属性不保护改名**——这一点容易被误读，写清：
-
-|动作|加了属性之后对下游|
-|:---|:---|
-|加变体|不破坏（新变体会落进下游的 `_`）|
-|**改名**变体|仍然 `E0599`（下游写过旧名就报错）|
-|**删除**变体|仍然 `E0599`（同上）|
-|改变体的载荷类型|仍然破坏|
-
-所以「先改名」不是为了让属性生效，而是因为**两件事各自都是一次 breaking**：0.1 未发布、
-无下游、无 commit，现在做都是免费的，合并进同一个窗口最省事。属性加得越晚，已经写好穷尽
-`match` 的下游越多，那一次 breaking 的波及面越大。
-
-反过来「先加属性、再改名」并不会失败，只是把两次 breaking 拆成两次发布——在还没有下游的
-今天没有区别，等有了下游就成了两个大版本。
-
-动作顺序写死为：**命名修正 → `#[non_exhaustive]` → commit**。属性落地后守一条规矩：
-**只加变体，不改不删**；改名与删除等于把 §18.9 这次重新付一遍。
-
-
----
-
-## 19. 首批 benchmark 结果（2026-11-07）
+|通道|`test_from_impl_makes_question_mark_work`、`test_message_shape_static_vs_allocated`、`test_degraded_error_cannot_be_recovered`、`test_wrapped_error_keeps_type_and_source_chain`、`test_wrapped_equality_is_textual`、`test_wrapped_error_crosses_the_trait_boundary`、`test_wrapped_variant_hands_out_the_erased_payload`|
+|边界|`test_truncated_payload_is_a_short_read`、`test_misaligned_fixed_size_elements`、`test_short_value_is_not_enough_bytes`、`test_unknown_name_is_skipped_but_bad_index_is_an_error`|
+|写入前拦截|`test_length_beyond_i32_max_is_reported_before_writing`、`test_compact_int_beyond_i32_max_is_rejected`|
+|位置|`test_failed_auto_decode_leaves_the_cursor_alone`、`test_offset_reported_from_inside_a_custom_impl`|
+|文本|`test_display_text_matches_the_variant_name`|
+
+`error.rs` 上另有 3 个 doc test（`message` / `wrapped` / `Wrapped` 的 downcast 取回）。
+
+## 19. benchmark：装置、数据与据此定型的决策
 
 ### 19.1 装置与不对称之处
 
@@ -2592,7 +2037,7 @@ BenchmarkDotNet 口径，与 §19.2 的 `min over rounds` 不同，故不并入�
 - **同一量级**，既没有「十倍慢」也没有「反超」；`i32` 单值 0.44 ns 说明 Rust 侧 harness
   没有把开销算进被测代码（C# 的 7.8 ns 是虚拟调用 + 委托，属于另一条路径）。
 - **encode 比 C++ template 慢 20–30%**（23.3 vs 17.7；53.1 vs 40.8）。第一嫌疑是
-  `Encoder` 的 `Inner` 枚举在每次 `write` 都要判 Owned/Borrowed，而 template 版是编译期
+  `Allocator` 的 `Inner` 枚举在每次 `append` 都要判 Owned/Borrowed，而 template 版是编译期
   展开成裸 span 写；第二嫌疑是每层 `?` 的 `Result` 检查。这两条都要改结构，不进本轮。
 - **named decode 反而是 Rust 最快**（108 vs C++ 126/141、C# 120）：`NamedMembers` 对 3 个
   成员做线性名字比较，比 C# 的委托链与 C++ 的 `type_index`/descriptor 遍历便宜。
@@ -2606,7 +2051,7 @@ BenchmarkDotNet 口径，与 §19.2 的 `min over rounds` 不同，故不并入�
 |:---|---:|---:|
 |`size_of::<Result<i32, _>>()`|24|16|
 |构造（静态消息）|0.43 ns|5.96 ns|
-|构造（动态消息）|37.0 ns（`custom(format_args!)`）|29.0 ns（`Box::new(MsgError(format!))`）|
+|构造（动态消息）|37.0 ns（`message(format_args!)`）|29.0 ns（`Box::new(MsgError(format!))`）|
 |传播 3 层（最内层失败）|3.93 ns|8.63 ns|
 |边界转换 `enum → dyn`|—|15.1 ns|
 |成功路径：decode 256 × `i32`|289.9 ns|289.2 ns|
@@ -2618,8 +2063,8 @@ BenchmarkDotNet 口径，与 §19.2 的 `min over rounds` 不同，故不并入�
 1. **成功路径完全无差**（289.9 vs 289.2）。「`Result` 从 24 字节缩到 16 字节」不存在可测收益，
    这一条从此不能当理由。
 2. **失败路径 ≈ 5.5 ns + 1 次分配**，与一次 `format!`（37 ns）同量级，且只在错误路径上发生。
-3. 于是 §18.8.1 的第二层判据被推翻：「零分配」不再能支撑保留 enum 的结论。
-   结论本身保留，理由改为可观测性 + `#[non_exhaustive]`（§18.8.7）。
+3. 于是「零分配」不能当保留 enum 的理由——保留的理由是可观测性：能 `match` 到变体、能
+   `assert_eq!`、能 `Clone`（§18.1）。
 4. 反过来看，`wrapped`（`Arc`，1 次 32 B 分配）比 `dyn` 的 `Box`（16 B）贵一倍，
    但换来了 `Clone` 与 `PartialEq`——这个交换在数据下依然是划算的。
 
@@ -2726,10 +2171,10 @@ Rust 侧（`cargo run --release -p binary-bench -- wire`，连跑三次取范围
    不可比，只有同一次会话里的比值有意义。
 2. **Rust 与 C++ virtual 打平，输给 template 约 1.6 倍**。virtual 那列是 `Converter<T>` 的虚
    调用，template 列是编译期单态化——Rust 的泛型本应站到 template 这一侧，实际落在 virtual
-   这一侧。**当时的头号嫌疑**是每次写入的 `Encoder::Inner` 分支。**订正（§19.15.4）**：这条
+   这一侧。**当时的头号嫌疑**是每次写入的 `Allocator::Inner` 分支。**订正（§19.15.4）**：这条
    已被实测否决——后端在构造时确定，内联后 discriminant 是常量，两次 `match` 被 LLVM 完全
-   折叠；即使用 opaque 值强制后端运行时不可知，16 次 `write` 也只多 3.3 ns（≈0.2 ns/write），
-   解释不了几十 ns 的差距。真正的开销在 `write_prefixed` 与逐成员的子 encoder。
+   折叠；即使用 opaque 值强制后端运行时不可知，16 次 `append` 也只多 3.3 ns（≈0.2 ns/write），
+   解释不了几十 ns 的差距。真正的开销在 `append_with_length_prefix` 与逐成员的子 allocator。
 3. **字符串口径**：三种语言的 string 内存表示不同（C# UTF-16 / C++ 8 位序列 / Rust
    UTF-8），跨语言行改用字节类型（C# `byte[]`），`string` 不参与比值（§19.15.1，用户裁定
    2026-11-08）。在此之前，涉及字符串的行只用于双边归因，不外推成跨语言结论。
@@ -2815,7 +2260,7 @@ WSL 同一会话、各三次：
 
 1. **`bool` 编码侧从整块写退回逐元素**。写 `bool` 本来完全安全（内存只可能是 `0` / `1`），
    现在为了让同一个常量在解码侧成立而被牺牲：`Vec<bool>` ×1024 从一次 bulk write 变成
-   1024 次 `write_byte`（约 2.3–2.5 µs）。这是决策**明确接受**的代价，依据是此类数据
+   1024 次 `append_byte`（约 2.3–2.5 µs）。这是决策**明确接受**的代价，依据是此类数据
    在实际应用中罕见、真需要应改 bitset。`char` 本来就是 `false`，无变化。
 2. **`POD` 变成 unsafe 语义契约，且下游可写**。`Layout` 是公开 trait，
    `impl Layout for MyType { const POD: bool = true; }` 是合法代码。编码侧误设最多写出脏字节；
@@ -2935,7 +2380,7 @@ impl）+ `lib.rs` 一行 `mod smart_ptr;`，**不改 wire、不改 derive 宏、
 1. `encode` / `encode_with_prefix` / `encode_auto` 三个方法都**显式转发**，不能依赖默认实现：
    默认 `encode_auto` / `encode_with_prefix` 按 `Self::LEN` 分派，会丢掉 `T` 上的 override
    （tuple 与 `#[binary(tuple)]` 的 flatten、`Option<T>`、`String` 的 O(1) 前缀）。
-2. `Layout::LEN = T::LEN`：否则 `Vec<Box<i32>>` 会把元素当变长、逐项 `write_prefixed`，
+2. `Layout::LEN = T::LEN`：否则 `Vec<Box<i32>>` 会把元素当变长、逐项 `append_with_length_prefix`，
    与 `Vec<i32>` 字节不一致。
 3. `Layout::POD` 恒 `false`：`size_of::<Ptr<T>>()` 是指针，而 `encode_slice` 编码侧没有
    `needs_drop` 守卫；误设 `true` 会把指针字节写进 wire，解码 bulk 分支更会把 wire 字节
@@ -2963,9 +2408,9 @@ Sized 的 pointee，故 `Box<str>` 无 `Decode`。**这与 `T` 是对称的**：
   没有信息，无条件插，**且只在 encode**——它的 `Decode` 返回惰性 `Token`，一次递归都不做）。
   这三处的性质是**兜底**：把不可捕获的 `StackOverflowException` 变成可捕获的
   `InsufficientExecutionStackException`，不是格式约束。C++ 侧完全没有。
-- **Rust 侧不加计数器、不加 `depth` 字段、不加 `Error` 变体。** 技术上 `Decoder` 加一个字段、
-  `with_prefix` 进出各改一次就做得到（递归类型每层必过 `with_prefix`，因为
-  `Option<Box<Node>>` 的 `LEN == 0` 走变长分支），但**深度不是格式的一部分**：wire 由字节
+- **Rust 侧不加计数器、不加 `depth` 字段、不加 `Error` 变体。** 技术上把游标换成一个带
+  `depth` 的结构体就做得到（递归类型每层必过 `decode_auto` 的变长分支，因为
+  `Option<Box<Node>>` 的 `LEN == 0`），但**深度不是格式的一部分**：wire 由字节
   定义，不由实现的常数定义。加了之后同一个字节串在 A 实现里深度 200 合法、在 B 实现里非法，
   是格式被实现污染；C# / C++ 都没有上限，Rust 单方面加上就破了「三边同一份数据同结果」。
   超深输入的正确归因是**资源不足**而非格式错误——10 万层的链表是合法数据，只是当前栈解不了；
@@ -3028,7 +2473,7 @@ hasher 也能编解。这是不引 `hashbrown` 的关键。
 10 元三边字节（§11.5.2）钉住，容器只是「不写个数地重复它们」，因此无需新增 C# fixture
 也能保证三边互解；唯一无法钉死的是哈希容器的**顺序**。
 `collections.rs` 里 `encode_items` / `encode_pairs` 两个 helper 与 `Vec<T>` 共用
-`write_prefixed_bounded(len * LEN)` / `write_prefixed` 的 O(1) vs anchor 分裂；`VecDeque` 用
+`append_with_length_prefix_bounded(len * LEN)` / `append_with_length_prefix` 的 O(1) vs anchor 分裂；`VecDeque` 用
 `as_slices()` 两段各调 `encode_slice`，保住 POD 整块写。所有 `Decode` 都委托
 `Vec<T>::decode` 再 `collect()`，因此自动继承定长计数、`MisalignedElements` 检查与
 `Layout::POD` bulk 读，没有复制第二份 `unsafe`。
@@ -3081,8 +2526,8 @@ raw、空容器、wrap 后的双段 `VecDeque`、变长值、嵌套容器）、�
    被测代码。
 2. **适配器拿不到「一次预留」的入口，会被入口税吃掉**。C++ 那份直接调
    `binary::internal::AllocatorUnsafeAccessor::Assign(allocator, len)` 拿 `&mut [u8]` 原地
-   写；Rust 的 `Encoder::write_prefixed_bytes` 是 `pub(crate)`，库外只能走
-   `write_prefixed_bounded` —— 6 字节字符串 **6.2 ns 对 2.6 ns**（§19.15.11）。一个成员贵
+   写；Rust 的 `Allocator::append_prefixed_bytes` 是 `pub(crate)`，库外只能走
+   `append_with_length_prefix_bounded` —— 6 字节字符串 **6.2 ns 对 2.6 ns**（§19.15.11）。一个成员贵
    3.6 ns，**比整条 `String` 成员（2.6 ns）还多**，而转码在 ASCII 负载上退化成窄拷贝，
    救不回这笔钱。于是「公平」变成给 Rust 凭空加一笔假成本。
 
@@ -3155,34 +2600,34 @@ owned `Vec` 两行与 `i32` 基线在 `objects` 里本来就有，删掉重复�
 |组|行|结果|读法|
 |:---|:---|---:|:---|
 |每次写入 ×16|flat cursor（1 次边界检查 + `copy_from_slice`）|1.07|下界|
-||`Encoder::write 4B`（borrowed，后端编译期已知）|1.07|**与下界相同**|
-||`Encoder::write 4B`（后端由 opaque 值决定）|4.32|枚举只值 3.25 ns / 16 = **0.20 ns/write**|
-||`Encoder::write 4B`（owned）|47.9|1 次 1024 B 分配占绝大部分|
+||`Allocator::append 4B`（borrowed，后端编译期已知）|1.07|**与下界相同**|
+||`Allocator::append 4B`（后端由 opaque 值决定）|4.32|枚举只值 3.25 ns / 16 = **0.20 ns/write**|
+||`Allocator::append 4B`（owned）|47.9|1 次 1024 B 分配占绝大部分|
 |前缀 ×16|flat 两次写|20.0|下界|
-||`Encoder` 两次 `write`|34.0|2.12 ns/次|
-||`write_prefixed_bounded(6, …)`|26.6|1.66 ns/次，**比两次顶层 `write` 还便宜**|
-||**`write_prefixed`**|**91.8**|**5.74 ns/次，是 precise 路径的 3.4×**|
+||`Allocator` 两次 `append`|34.0|2.12 ns/次|
+||`append_with_length_prefix_bounded(6, …)`|26.6|1.66 ns/次，**比两次顶层 `append` 还便宜**|
+||**`append_with_length_prefix`**|**91.8**|**5.74 ns/次，是 precise 路径的 3.4×**|
 ||`String::encode_with_prefix`|74.2|4.64 ns/次（堆上 `String`，长度是运行时 load）|
 |named 成员 ×16|flat 8 B 一次写|2.12|下界|
 ||`write_named_member(Id, i32)`|21.8|1.36 ns/成员|
 ||`write_named_member(Name, String)`|183.3|11.46 ns/成员|
 
-**编码侧结论**：`Encoder::Inner` 不是瓶颈（§19.8 的头号嫌疑被否决）；真正贵的是
-`write_prefixed` —— 先占位 4 字节（不清零）、写 payload、再回填或定长 `u64` 搬移压缩。这份
+**编码侧结论**：`Allocator::Inner` 不是瓶颈（§19.8 的头号嫌疑被否决）；真正贵的是
+`append_with_length_prefix` —— 先占位 4 字节（不清零）、写 payload、再回填或定长 `u64` 搬移压缩。这份
 payload 里它被调用 3 次（named 的 auto 外层、`Item`、`Tags`），C++ `Allocator::FinishAnchor`
 也做同样的 wire 动作，但 Rust 用闭包 + 子切片实现更重。其次是每个 named 成员：
-`write_name`（当时的私有半操作，现已删除）把前缀编进栈上 `[u8; 4]` 再**两次** `write`，
+私有半操作 `write_name`（已删除）曾把前缀编进栈上 `[u8; 4]` 再**两次** `append`，
 值又走 `encode_with_prefix` →
-`write_prefixed_bounded` → 新建一个子 `Encoder`。`encode tuple (owned Vec)` 57.4 ns vs `on_slice`
+`append_with_length_prefix_bounded` → 新建一个子 `Allocator`。`encode tuple (owned Vec)` 57.4 ns vs `on_slice`
 25.6 ns（2.2×），差额是 1 次 256 B 分配 + 每次 `Vec::resize` 检查 + `finish()`。
 
 > **倍率口径订正（2026-11-08，见 §19.15.5）**：上表「3.4×」**只在 fat LTO 下成立**。
-> 同会话 default release 跑同一份源码是 `write_prefixed_bounded` 50.2 ns / `write_prefixed` 105.0 ns
+> 同会话 default release 跑同一份源码是 `append_with_length_prefix_bounded` 50.2 ns / `append_with_length_prefix` 105.0 ns
 > = **2.1×**。倍率变大不是兜底路径变慢，而是 LTO 把主路径从 50.2 内联到 26.3 ns、兜底路径
 > 只从 105.0 降到 88.0 ns。引用这条结论必须带上 profile；它衡量的是**可内联性差异**，
 > 不是两条算法路径的固有代价比。同一现象在 `write_named_member(Id, i32)` 上更极端：
-> default 67.9 ns → fat LTO 21.7 ns（3.1×），而手写 4 次 `write` 几乎不变（60.5 / 57.9 ns）
-> —— 收益集中在闭包 + 子 `Encoder` 调用链的内联，而不是字节写入。
+> default 67.9 ns → fat LTO 21.7 ns（3.1×），而手写 4 次 `append` 几乎不变（60.5 / 57.9 ns）
+> —— 收益集中在闭包 + 子 `Allocator` 调用链的内联，而不是字节写入。
 
 **解码侧结论**（1 KiB ASCII）：
 
@@ -3232,8 +2677,7 @@ named encode 慢近两成。跨会话比较必须同时固定二进制组成与 
 #### 19.15.7 ≤16 B 压缩：100 串混合长度实测与最终抉择（2026-11-08）
 
 **口径**：100 个长度 0~32 的 UTF-8 字符串、固定种子打乱（≤16 B 46 个、>16 B 54 个、
-空串 8 个、33 种长度全覆盖）。每 op 把它们依次用各语言**当前的 Allocator / Encoder
-兜底入口**（C# / C++ `Allocator::AppendWithLengthPrefix`、Rust `Encoder::write_prefixed`）
+空串 8 个、33 种长度全覆盖）。每 op 把它们依次用各语言**当前的 allocator 兜底入口**（C# / C++ `Allocator::AppendWithLengthPrefix`、Rust `Allocator::append_with_length_prefix`）
 写入提前分配的 4096 B buffer，全程无 realloc。三份实现都从库源码复制后剪裁，**唯一变量
 是 ≤16 B 压缩的搬移形状**：A 定长 `u64`（当前实现）、B 精确长度 `memmove`；阈值、
 `(-length) & 7` 尾部余量条件、wire 完全相同。C# 用 `byte[]`、不做 UTF-16 转码。两变体在
@@ -3266,9 +2710,9 @@ named encode 慢近两成。跨会话比较必须同时固定二进制组成与 
 
 **2026-11-09 补测（纯分支重构，wire 不变）**：兜底分支合并成与 C#
 `Allocator.FinishAnchor` / C++ `Allocator::FinishAnchor` 同形的单一 `if`
-之后，`profile` 的相关行交替 A/B（两份二进制、各两轮）：`write_prefixed`（6 B）
-154.8 / 153.1 → 140.1 / 136.8 ns/op，`write_prefixed`（20 B，宽头）104.6 / 97.7 →
-95.4 / 69.1；但同一二进制里**未改动**的 `write_prefixed_bounded` 对照行同样漂移
+之后，`profile` 的相关行交替 A/B（两份二进制、各两轮）：`append_with_length_prefix`（6 B）
+154.8 / 153.1 → 140.1 / 136.8 ns/op，`append_with_length_prefix`（20 B，宽头）104.6 / 97.7 →
+95.4 / 69.1；但同一二进制里**未改动**的 `append_with_length_prefix_bounded` 对照行同样漂移
 ±8~20%（82.7 / 85.9 → 77.7 / 73.2）。判为**无回归、落在噪声内**，不宣称变快——
 合并的目的是消掉重复分支，不是性能改动（端到端 A/B 判不了这个量级，见下）。
 
@@ -3330,9 +2774,9 @@ tuple object 21.3 / 67.7、named 26.5 / 77.7。Rust 没有这一层，对位的�
 - **tuple encode 与虚拟分发只差 8%**（24.1 对 22.3），说明这 1.6× 的差距来自逐成员的
   前缀写入，不来自分发方式；
 - **named encode 对虚拟分发仍差 2.6×**（69.5 对 26.5），对 template 差 4.35× —— 这是本表
-  里唯一的结构性差距。当时的猜测是「每个成员一次 `write_prefixed`（≈5.7 ns）加一次子
-  `Encoder` 构造」，§19.15.9 逐段实测后订正为：主因是名字段的两次 `write`，值前缀的
-  子 `Encoder` 只占剩下那一半；
+  里唯一的结构性差距。当时的猜测是「每个成员一次 `append_with_length_prefix`（≈5.7 ns）加一次子
+  `Allocator` 构造」，§19.15.9 逐段实测后订正为：主因是名字段的两次 `append`，值前缀的
+  子 `Allocator` 只占剩下那一半；
 - **decode 1.4–1.6×**，但 C++ 的 `std::string` 短串走 SSO 且不校验 UTF-8，Rust 恒分配
   + 恒校验；名字解析本身已经打平（10.8 对 11.7），差额全在值与分配上；
 - **owned 路径差距更小**（tuple 1.35×）：一次 1024 B 分配把两侧拉近了一部分。
@@ -3364,7 +2808,7 @@ named encode 16.0 → 94.8、`i32` encode 0.42 → 3.4；Rust fat LTO 反而让 
 
 #### 19.15.9 named encode 的 4×：归因与改动（2026-11-08）
 
-> 命名说明：本节记录当时的 `Encoder::named` 与私有半操作 `write_name`。现在成员
+> 命名说明：本节记录当时的 `Allocator::named` 与私有半操作 `write_name`。现在成员
 > 写入是自由函数 `write_named_member`，名字段仍是一次预留，机制与数据不变。
 
 §19.15.8 留下一个反常点：C++ 的 named 只比 tuple 贵 1.4 ns（多 35 B、多 4 个成员），
@@ -3379,8 +2823,8 @@ Rust 却贵 32.7 ns。**差距按写入次数增长，不按字节数增长** �
 |C 裸指针 sink|只搬字节，无检查、无 `Result`|14.1|14.1|
 |D 具体后端 + 完整契约|边界检查 + `Result<(), Error>` + anchor 压缩，无 enum|28.8|27.6|
 |G D + `Owned`/`Borrowed` enum|加回后端 tag 与 `Vec::resize` 分支|32.4|27.2|
-|B 真实 `Encoder`，名字用常量字面量|每名字一次 `write`|44.9|41.5|
-|A derive 现状|`write_name` 两次 `write`|59.8|57.7|
+|B 真实 `Allocator`，名字用常量字面量|每名字一次 `append`|44.9|41.5|
+|A derive 现状|`write_name` 两次 `append`|59.8|57.7|
 
 C++ `NamedObjectConverter` 同会话是 16.0。三点结论：
 
@@ -3394,11 +2838,11 @@ C++ `NamedObjectConverter` 同会话是 16.0。三点结论：
 
 **三条具体机制**（对应 A 相对 C 的 45 ns）：
 
-1. `Encoder::named` 先调私有的 `write_name`：前缀写进栈上 `[u8; 4]` → `write` 前缀 →
-   `write` 名字。一个成员三件事、两次运行时长度的 `memcpy`。C++ 的
+1. `Allocator::named` 先调私有的 `write_name`：前缀写进栈上 `[u8; 4]` → `append` 前缀 →
+   `append` 名字。一个成员三件事、两次运行时长度的 `memcpy`。C++ 的
    `EncodeWithLengthPrefix(Allocator&, span)` 是「一次 `Assign(n + prefix)` + 一次
    `memcpy` + 一个字节 store」。A − B = 16 ns / 6 个名字 ≈ **2.7 ns 每个名字**。
-2. 每次 `write` 要过：后端 tag → 边界检查 → `copy_from_slice`（长度是运行时值，未常量
+2. 每次 `append` 要过：后端 tag → 边界检查 → `copy_from_slice`（长度是运行时值，未常量
    折叠时是真 `memcpy` 调用）→ 返回 24 B 的 `Result`（`size_of::<Error>() == 24`，
    x86-64 上走 sret）。named 全程约 20 次写、6 次 anchor 压缩，这条固定成本被乘 20 次；
    tuple 只有 8 次左右。**这是「按次数增长」的来源。**
@@ -3409,9 +2853,9 @@ C++ `NamedObjectConverter` 同会话是 16.0。三点结论：
 
 **改动（只动编码热路径，wire 不变）**
 
-- 新增 crate 内 `Encoder::write_prefixed_bytes`：一次 `ensure_capacity(header + len)`，
+- 新增 crate 内 `Allocator::append_prefixed_bytes`：一次 `ensure_capacity(header + len)`，
   然后把头字节和 payload 直接写进该区域，与 C++ `EncodeWithLengthPrefix` 同形。
-- `Encoder::named` 的名字段改走它（`write_name` 从两次 `write` 变成一次保留）。
+- `Allocator::named` 的名字段改走它（`write_name` 从两次 `append` 变成一次保留）。
 - 结果（同会话，C++ 对照组三次稳定在 encode 15.9 / decode 69.9）：
 
 |行|改前|改后|C++|
@@ -3423,29 +2867,29 @@ C++ `NamedObjectConverter` 同会话是 16.0。三点结论：
 
   named encode 默认 −24%、fat LTO −49%，与 C++ 的比值从 3.5~4.4× 降到 **2.2~2.7×**
   （`auto` 形式 2.35×，与 C++ virtual 的 2.6× 基本持平）。wire 三份 hex 逐字节不变。
-  decode 行 +3% 没有代码路径相连（`Decoder` 不经过 `Encoder`），且 C++ 对照组同会话
+  decode 行 +3% 没有代码路径相连（读侧不经过 `Allocator`），且 C++ 对照组同会话
   三次稳定在 69.9 —— 判为布局，`encode tuple owned` 同时 −5% 也是同一原因。
 
 **被否决的两条（留记录，别再试）**
 
 - `String` / `Vec` 用「已知长度的 bounded 前缀」：库里**已经是**这样（`container.rs` 的
-  `encode_with_prefix` 调 `write_prefixed_bounded(self.len(), …)`）。隔离实验里那 7 ns
+  `encode_with_prefix` 调 `append_with_length_prefix_bounded(self.len(), …)`）。隔离实验里那 7 ns
   差异在两种构建下方向相反，判为布局噪声。
 - 把扩容分支标 `#[cold] #[inline(never)]`：LTO 下 named 再快 2.5 ns（38.0 → 33.2），但
   owned 路径付 6~7 ns（tuple owned 58.7 → 62.8，默认 70.4 → 74.3），净负。
 
-**剩下的 2.2~2.7× 在哪**：每个成员仍是「名字一次保留 + 值一次 `write_prefixed_bounded`」，
-后者为了拿到 `actual` 会建一个子 `Encoder`（另一个 enum + 自己的 `pos`）再读回长度。
+**剩下的 2.2~2.7× 在哪**：每个成员仍是「名字一次保留 + 值一次 `append_with_length_prefix_bounded`」，
+后者为了拿到 `actual` 会建一个子 `Allocator`（另一个 enum + 自己的 `pos`）再读回长度。
 按上表的阶梯，把它也压平到「已知长度直接写头」是下一步唯一的量级来源 —— 已在 §19.15.10
-做掉：子 `Encoder` 拿掉了，但那 2.2× 并没有跟着消失，来源是每次写入的固定成本。
+做掉：子 `Allocator` 拿掉了，但那 2.2× 并没有跟着消失，来源是每次写入的固定成本。
 
-#### 19.15.10 去掉值前缀的子 `Encoder`（2026-11-08）
+#### 19.15.10 去掉值前缀的子 `Allocator`（2026-11-08）
 
-§19.15.9 结尾把剩余的 2.2~2.7× 归到「值前缀为拿 `actual` 建了一个子 `Encoder`」。这一节把
-它拆掉：`write_prefixed_bounded` 现在只在一个编码器上工作 —— 只预留 header，`f` 直接写这个
-`Encoder`，写完读 `self.pos` 得 `actual`，超界报错。wire 不变。
+§19.15.9 结尾把剩余的 2.2~2.7× 归到「值前缀为拿 `actual` 建了一个子 `Allocator`」。这一节把
+它拆掉：`append_with_length_prefix_bounded` 现在只在一个编码器上工作 —— 只预留 header，`f` 直接写这个
+`Allocator`，写完读 `self.pos` 得 `actual`，超界报错。wire 不变。
 
-**为什么子 `Encoder` 是错的**（是「不该存在」，不只是「慢」）：
+**为什么子 `Allocator` 是错的**（是「不该存在」，不只是「慢」）：
 
 - **两个状态机**：第二个 `Inner` 判别 + 第二个 `pos`，`f` 里每一次写都要按一个调用方从未
   选择的后端重新分支；
@@ -3463,7 +2907,7 @@ C++ `NamedObjectConverter` 同会话是 16.0。三点结论：
 
 |形态|named raw 默认|named raw LTO|tuple raw 默认|tuple raw LTO|named owned 默认|tuple owned LTO|
 |:---|---:|---:|---:|---:|---:|---:|
-|A 子 `Encoder`（改前）|42.2|35.3|23.2|24.7|98.6|55.1|
+|A 子 `Allocator`（改前）|42.2|35.3|23.2|24.7|98.6|55.1|
 |B 单编码器 + 回滚 + 内联 message|45.7|38.6|26.4|27.1|105.5|57.8|
 |C B 但 message 走 `#[cold]`|44.3|36.1|25.4|25.5|101.4|56.5|
 |**D C 去掉回滚（落地）**|**42.2**|**35.8**|**23.7**|**24.9**|**104.8**|**57.8**|
@@ -3474,7 +2918,7 @@ C++ `NamedObjectConverter` 同会话是 16.0。三点结论：
 
 - **回滚值 2 ns**（B/C 对 D）：`self.pos = at` 这条只在错误路径执行的 store 把 `pos` 钉回
   内存，整个成员再也回不到寄存器。这与 §19.15.9「扩容分支标 `#[cold]` 反而更慢」是同一类
-  现象 —— **极少执行的分支不是免费的**。于是错误语义与 `write_prefixed` 对齐：出错即终止，
+  现象 —— **极少执行的分支不是免费的**。于是错误语义与 `append_with_length_prefix` 对齐：出错即终止，
   不保证位置，也不保证已写下的字节构成一个成员。
 - **owned 预留不是免费的**（E/F）：E 把上界当预留，borrowed 行全部变差（named 42.2 → 43.8、
   tuple 23.7 → 25.1）；F 想只给 owned 预留，那次后端判别本身就把 borrowed 拖垮
@@ -3491,8 +2935,8 @@ C++ 对照组同会话不变（named 16.1、tuple 14.5、parse 11.7），所以 
 C++ template 从 2.23× 变成 **2.26×**，tuple 从 1.72× 变成 **1.74×**。
 
 还有一条行为改进（有测试钉住）：borrowed 上「估算偏大」从 `BufferFull` 变成正常成功
-（`test_write_prefixed_bounded_estimate_is_not_charged_to_borrowed_space`），payload 超过
-声明上界则报 `Error::Message`（`test_write_prefixed_bounded_overshoot_is_an_error`），
+（`test_append_with_length_prefix_bounded_estimate_is_not_charged_to_borrowed_space`），payload 超过
+声明上界则报 `Error::Message`（`test_append_with_length_prefix_bounded_overshoot_is_an_error`），
 不再是借来的 `BufferFull`。
 
 #### 19.15.11 基础 tuple：按步骤拆解，前缀路径的最后一刀（2026-11-08）
@@ -3506,14 +2950,14 @@ C++ 侧 `flatten`）。负载 `(i32, String, Vec<i32>, (f64, Vec<String>))` = 50
 
 |步骤|Rust 改前|Rust 改后|C++ LTO|
 |:---|---:|---:|---:|
-|S0 只构造 `Encoder` / `Allocator`|0.42|0.42|0.42|
+|S0 只构造 allocator|0.42|0.42|0.42|
 |S1 一次写 50 B（memcpy 下界）|2.14|2.13|2.32|
 |S2 12 次裸写（前缀写字面量）|16.4|16.4|12.95|
 |S3 成员走真实 API（手写展开）|27.2|24.4|14.5|
 |S4 tuple `encode`（真实，探针内）|24.4|16.8|14.5|
 |M1 `i32` auto|1.01|1.05|0.10|
 |M2 `String` auto（前缀路径）|6.2|2.6|2.31|
-|M3 `String` 两次 `write`|3.4|2.6|3.37|
+|M3 `String` 两次 `append`|3.4|2.6|3.37|
 |M4 `Vec<i32>` auto|5.8|6.2|2.32|
 |M5 `Vec<i32>` 手写|5.8|4.9|2.88|
 |M6 `f64`|0.95|1.05|0.21|
@@ -3528,17 +2972,17 @@ C++ 侧 `flatten`）。负载 `(i32, String, Vec<i32>, (f64, Vec<String>))` = 50
    互有胜负，差 ≤10%，就是函数落位；4 元组的分发、`auto` 转发、宏展开都是 0。**别再怀疑
    tuple 层。**
 2. **钱在「每个变长成员的前缀」**：S2 → S3 是「把字面量前缀换成真实 API」，Rust 改前
-   +10.8 ns，C++ 只有 +1.5 ns。逐成员看更清楚 —— `String` 前缀 Rust 6.2 vs 两次 `write`
+   +10.8 ns，C++ 只有 +1.5 ns。逐成员看更清楚 —— `String` 前缀 Rust 6.2 vs 两次 `append`
    3.4（贵 2.8），C++ 反过来：`EncodeWithLengthPrefix` 2.31 vs 两次 `Append` 3.37（**一次
    完成比两次 Append 便宜**）。同样的语义，两边符号相反，这就是缺口。
 3. **原因在 API 形状**：`String::encode_with_prefix` 走的是
-   `write_prefixed_bounded(len, |e| e.write(bytes))` —— 长度本来精确，bounded 只是借来复用。
+   `append_with_length_prefix_bounded(len, |e| e.write(bytes))` —— 长度本来精确，bounded 只是借来复用。
    它要 `ensure(h)` → 手动推进 `pos` → `f` 里再 `ensure + memcpy + pos` → 事后回写 header，
-   两次容量检查、两次 `as_mut_slice`、两次 `pos` 更新；`write_prefixed_bytes` 只有一次预留、
+   两次容量检查、两次 `as_mut_slice`、两次 `pos` 更新；`append_prefixed_bytes` 只有一次预留、
    一次写头、一次 memcpy。
 
 **改动**：`String` / `str` / `[u8]` / `&str` / `&[u8]` 的 `encode_with_prefix` 改走
-`write_prefixed_bytes`（`encoder.rs` 里本来只给成员名用，§19.15.9），并把它的 >127 分支拆成
+`append_prefixed_bytes`（`allocator.rs` 里本来只给成员名用，§19.15.9），并把它的 >127 分支拆成
 `#[cold] #[inline(never)]`，1 字节臂只留「ensure + 写头 + memcpy」。`Vec<T>` **不动**：
 M4/M5 说明 POD 容器的 bounded 与手写打平（16 B memcpy 主导），改它没有收益。wire 不变
 （头宽仍由 `prefix_header_len(len)` 决定，`test_long_prefix_boundary` 覆盖 127/128 边界）。
@@ -3567,8 +3011,8 @@ M4/M5 说明 POD 容器的 bounded 与手写打平（16 B memcpy 主导），改
 |`named parse only`|12.7|12.7|10.7|10.8|11.8|
 
 tuple 的 1.75× 消失；named 仍是 2.1×（它的一半成本是 4 个名字段，§19.15.9 已修，剩下的
-是「值前缀 + 名字段各一次 write_prefixed_bytes」的固定开销，C++ 那份固定开销更小 —— M1/M6
-显示 Rust 单次 `write` 1.0 vs C++ 0.1~0.2）。**tuple 与 named 现在是同一类差距，不再有
+是「值前缀 + 名字段各一次 append_prefixed_bytes」的固定开销，C++ 那份固定开销更小 —— M1/M6
+显示 Rust 单次 `append` 1.0 vs C++ 0.1~0.2）。**tuple 与 named 现在是同一类差距，不再有
 「named 特有」的部分。**
 
 #### 19.15.12 `Error` / `Result` 有多大，以及它在热路径上花了多少（2026-11-08）
@@ -3582,16 +3026,15 @@ tuple 的 1.75× 消失；named 仍是 2.1×（它的一半成本是 4 个名字
 |`Result<String>` / `Result<Vec<u8>>` / `Result<Vec<String>>`|**32**|24 字节 `String`/`Vec` + 判别字节|
 |`Option<Error>`|24|判别值填在 `Error` 的 niche 里|
 |`Cow<'static, str>`|24|见下|
-|`ErasedError`（`Arc<dyn Error>`）|16|胖指针|
+|`Arc<dyn Error + Send + Sync>`（`Wrapped` 的载荷）|16|胖指针|
 |`&'static str`|16||
 |`Result<(), ()>` / `Result<(), u8>`（基线）|1 / 2||
 
-**为什么是 24**：三个大 payload 撑着 —— `Message(Cow<'static, str>)` 24 字节、
-`MissingMember(&'static str)` 16、`Wrapped(ErasedError)` 16；再加 1 字节判别，按 8 对齐
-就是 24。**把 `Cow` 装箱到 8 字节并不能降下来**：实测只改 `Message(Box<Cow<…>>)` 后
-`Error` 仍是 24（16 字节 payload + 判别字节向上取整）。要真的降到 16，得把
-`MissingMember(&'static str)` 和 `Arc<dyn Error>` 一起装箱 —— 错误路径多一次分配、公开 API
-变形，换 8 字节，不做。
+**为什么是 24**：`Message(Cow<'static, str>)` 24 字节是唯一宽的 payload，
+`Wrapped(Arc<dyn Error>)` 16；判别值落在 niche 里，`Option<Error>` 也仍是 24。
+**把 `Cow` 装箱到 8 字节并不能降下来**：实测只改 `Message(Box<Cow<…>>)` 后 `Error` 仍是 24
+（16 字节 payload + 判别字节向上取整）。要真的降到 16，得把 `Message` 与 `Wrapped` 一起装箱
+—— 错误路径多一次分配、公开 API 变形，换 8 字节，不做。
 
 **成功路径不搬这 24 字节**：`Ok(())` 只写一个判别字节，payload 保持未初始化（原始字节里只有
 首字节是确定值，其余是栈上残留）；`Result<()>` 与 `Option<Error>` 都不额外加 tag，判别值填在
@@ -3613,7 +3056,7 @@ callee 写判别 + caller 读判别」。实测（同一 50 字节 tuple 体、�
 −3.52~+0.73（噪声覆盖）。结论：24 字节错误通道的价格 ≈ **0.2 ns/call**，与 2 字节结果几乎
 不可分；真正贵的是「过边界」本身，不是错误类型的大小。
 
-**热路径上没有这个边界**：`Encoder::write` / `ensure_capacity` / `encode_with_prefix` 全是
+**热路径上没有这个边界**：`Allocator::append` / `ensure_capacity` / `encode_with_prefix` 全是
 `#[inline]`，泛型在调用方单态化，`?` 在成功路径上退化成一个判别比较，LLVM 不会为 `Result<()>`
 开槽。所以 §19.15.11 的 16.1 ns 里没有「错误返回值」这一项，把 `Error` 缩到 16 字节也不会
 更快。反过来算一下量级：tuple encode 有 17 次写入，**假如**每次都落在非内联边界上，
@@ -3643,7 +3086,7 @@ callee 写判别 + caller 读判别」。实测（同一 50 字节 tuple 体、�
 `resize` 上。`resize(50, 0)` 单独只要 5.40，说明 memset 本身不贵 —— 贵的是**每次写入都重新
 走一遍 resize 的容量判断 / len 更新**。
 
-**落地形态：水位线放构造期，不碰 `ensure_capacity`。** `Encoder::with_capacity(n)` 先用
+**落地形态：水位线放构造期，不碰 `ensure_capacity`。** `Allocator::with_capacity(n)` 先用
 `resize(min(n, COMMIT_AHEAD), 0)` 把 `Vec::len` 抬到水位线（`COMMIT_AHEAD = 128`），
 `ensure_capacity` / `ensure_prefix_tail` 一字不改。`len` 从此表示「已提交到哪」，只有 `pos`
 表示写了多少，`finish` / `as_bytes` 都按 `pos` 截断，所以 **wire 逐字节不变**（三语言 hex 全同）。
@@ -3733,7 +3176,7 @@ payload 在内存里，容量由调用方在构造期给上界，收益实测到
 
 编码侧和 §19.15.14 的解码侧不是同一个问题：编码时 payload 已经在内存里，**长度可以提前知道**，
 所以「预留多少」是调用方的决定，不是库的启发式。三条实现都只把这个决定放在构造处 ——
-Rust `Encoder::with_capacity(n)` / `Encoder::on_slice(&mut [u8])`，C++ `Allocator(std::span<std::byte>)`
+Rust `Allocator::with_capacity(n)` / `Allocator::on_slice(&mut [u8])`，C++ `Allocator(std::span<std::byte>)`
 / `Allocator(IAllocator&, maxCapacity)`，C# `Allocator(Span<byte>)` /
 `Allocator(IAllocator, int maxCapacity)`；**没有一个提供写入中途的 reserve**。这不是巧合，是
 同一套 wire 实现共享的形状：容量在创建时定，写入路径只做容量判断。差别只在「预分配」怎么表达：
@@ -3767,7 +3210,7 @@ Rust 的 owned 后端收一个**初始容量**；C++ / C# 的 growable 重载只
 malloc + free（§19.15.13 拆过：malloc 5.3、`finish` 里的 free 约 10）。长度确定、缓冲可复用时，
 借用后端把这两笔一起省掉。
 
-因此分工是：**解码侧不在 `Vec::decode` 里猜元素个数（§19.15.14 否决），编码侧在 `Encoder`
+因此分工是：**解码侧不在 `Vec::decode` 里猜元素个数（§19.15.14 否决），编码侧在 `Allocator`
 构造时由调用方给上界**。库这边不做增长启发式 —— `ensure_capacity` 只 `resize` 到
 `pos + additional`；「grow to needed + headroom」那版曾把 `vec<i32> x1024` 从 80 ns 打到
 788 / 2219 ns（§19.15.13），形态问题比省下的几次 realloc 重要得多。
@@ -3849,10 +3292,10 @@ malloc + free（§19.15.13 拆过：malloc 5.3、`finish` 里的 free 约 10）�
 |`Vec<i32>` ×16384，`with_capacity(wire)`|1372.7|930.3|
 
 改完 owned 与 borrowed 只差一次 malloc + free（64 KiB 上 927 对 912），这也解释了 §19.15.15
-里 owned 那一列的固定成本。实现只动 `Encoder::write` 的 owned 分支：`src.len() >=
+里 owned 那一列的固定成本。实现只动 `Allocator::append` 的 owned 分支：`src.len() >=
 BULK_WRITE_MIN`（256）时，先把落在已提交区间里的头部就地拷进去，其余 `extend_from_slice`
-追加；小于 256 字节仍走原路径 —— 那个规模清零只值 1~2 ns，而 `write` 在标量路径上，多一个
-分支不划算。`write_prefixed_bytes_wide` 改成「先写 4 字节头，payload 交给 `write`」，它原来
+追加；小于 256 字节仍走原路径 —— 那个规模清零只值 1~2 ns，而 `append` 在标量路径上，多一个
+分支不划算。`append_prefixed_bytes_wide` 改成「先写 4 字节头，payload 交给 `append`」，它原来
 在一次 `ensure_capacity(4 + len)` 里把整段一起清零。水位线模型没变：`pos` 之外的字节仍然不会
 被观察到，`finish` / `as_bytes` 仍按 `pos` 截断，wire 逐字节不变。
 
@@ -3921,12 +3364,12 @@ payload 的 30% 才是这一节的结论。
 
 三个来源，逐个都能对上：
 
-- 窄前缀臂（`write_prefixed_bytes`）原本是「一次容量检查 + 两次直写」，append-only 下变成
+- 窄前缀臂（`append_prefixed_bytes`）原本是「一次容量检查 + 两次直写」，append-only 下变成
   `push` + `extend_from_slice` 两次检查，4 个 name 段就是 named 那 +13.6% 的主要部分；
-- `write_prefixed` 的 4 字节 anchor 占位从「把 `pos` 推过去」变成真的写 4 个字节，缩头时还
+- `append_with_length_prefix` 的 4 字节 anchor 占位从「把 `pos` 推过去」变成真的写 4 个字节，缩头时还
   要把 `(-length) & 7` 个 pad 字节写出来再截掉（C++ 那边 pad 是垃圾，Rust 必须初始化才能
   被 `move_u64` 读）；
-- 最要命的一条：`write` 的 owned 臂从「一次 `len` 比较」变成 `extend_from_slice`（内含
+- 最要命的一条：`append` 的 owned 臂从「一次 `len` 比较」变成 `extend_from_slice`（内含
   `reserve` 与可能的 realloc），它被内联进 borrowed 的逐元素循环后 LLVM 不再向量化，
   `vec<i32> x1024` 80 → 128 ns。这与 §19.15.13 记的「增长策略不能放进写入路径」是同一个
   机制：**owned 臂多一点工作，borrowed 的循环就少一条向量指令**。
@@ -3941,13 +3384,13 @@ payload 的 30% 才是这一节的结论。
 零填充切片、`0x5A` / `0xFF` 填充切片、以及 `with_capacity(0)`（无水位线，必须增长一次），
 要求逐字节一致。反过来，这也是唯一能发现「转换器预留了两倍只写一半」的地方：owned 路径的
 水位线本来就是 0，泄漏的未写字节在那边看起来就是合法的零字节。借用缓冲留 16 B slack ——
-`write_prefixed` 的压缩需要 `(-length) & 7` 的余量，不够就保留 4 字节头（合法 wire，C#/C++
+`append_with_length_prefix` 的压缩需要 `(-length) & 7` 的余量，不够就保留 4 字节头（合法 wire，C#/C++
 同规则），那是「可用空间」的差异，不是「初值」的差异。
 
-顺带修了一处测量污染：`profile` 的 `Encoder::write_byte (borrowed)` 行原来把 `black_box`
+顺带修了一处测量污染：`profile` 的 `Allocator::append_byte (borrowed)` 行原来把 `black_box`
 放在循环里，每次迭代一次 store 加一次依赖它的 load（store-to-load forwarding），报出
-22.19 ns，而同一组的 `write 1B` 是 2.19 ns。把 `black_box` 提到循环外后是 **2.15 ns**，与
-`write 1B` 持平 —— 之前那个数字描述的是 harness，不是库。凡是要在循环里重复的标量都必须
+22.19 ns，而同一组的 `append 1B` 是 2.19 ns。把 `black_box` 提到循环外后是 **2.15 ns**，与
+`append 1B` 持平 —— 之前那个数字描述的是 harness，不是库。凡是要在循环里重复的标量都必须
 提到循环外；这不是优化，是让数字描述库。
 
 ---
@@ -3965,9 +3408,8 @@ Rust 没有 `unsafe const`，也没有语言级的「无 padding / 任意 bit pa
 内存）；解码侧 `copy_nonoverlapping` + `set_len` 把**不可信输入**采纳成值 —— `NonZeroU8`
 读到 `00`、`repr(u8)` 双变体 enum 读到 `03` 都是立即 UB。`needs_drop` / `size_of` 两道守卫
 挡得住「带析构」和「长度写错」，恰恰挡不住「bit pattern 受限但没有析构」——而这类类型
-（`NonZeroU8`、C 类枚举、`repr(u8)` 状态机）正是最容易被顺手标成 POD 的。这曾是待办清单上
-唯一一处公开面 soundness 缺口（当时记在 §20.3，现已清空），本轮收回内部后已关闭
-（本节结论）。
+（`NonZeroU8`、C 类枚举、`repr(u8)` 状态机）正是最容易被顺手标成 POD 的。这是公开面上唯一一处
+soundness 缺口；`POD` 收回内部后不再存在（本节结论）。
 
 **为什么不能直接封死那个常量**（三条都试过）：
 
@@ -4032,7 +3474,7 @@ Rust 没有 `unsafe const`，也没有语言级的「无 padding / 任意 bit pa
    同一轮里 `named encode` 出现过 +7.7%，补 `#[inline]` 后消失（1.004）——判为落位噪声，
    不是这次改动引入的。
 2. **`vec<bool>` 2150 → 958（2.2×）**。旧循环写的是 `e.auto(item)`，即
-   `Encoder::auto` → `Encode::encode_auto` 多一跳且没被内联；新的默认钩子直接
+   `Allocator::auto` → `Encode::encode_auto` 多一跳且没被内联；新的默认钩子直接
    `item.encode_auto(e)`。也就是说**外部类型的逐元素路径顺带快了一倍**（那条循环每元素一次
    调用 + 一次 `Result`）。`LoopI32` 行不动，因为那条循环本来就被 LLVM 向量化掉了。
 
@@ -4061,7 +3503,7 @@ Rust 没有 `unsafe const`，也没有语言级的「无 padding / 任意 bit pa
 
 ### 19.17 `with` / `borrow`：成员级转换器与借用解码（2026-11-08）
 
-待办清单上最后一项功能缺口（当时记在 §20.3，现已清空），本轮关闭。两项都**不动 wire**：`with` 让成员的 wire 形状与 Rust 类型解耦，
+两项都**不动 wire**：`with` 让成员的 wire 形状与 Rust 类型解耦，
 `borrow` 让解码结果指回输入缓冲。对端早有对应能力（C# `[Converter]` / `SpanLike` 一族，
 C++ `FixedConverterPolicy` / `std::span`），Rust 缺的是 derive 的入口。
 
@@ -4071,7 +3513,7 @@ C++ `FixedConverterPolicy` / `std::span`），Rust 缺的是 derive 的入口。
 
 |候选|形状|结论|
 |:---|:---|:---|
-|三函数|`encode` / `decode` / `len`|否。`write_prefixed_bounded` 的头宽由传入长度决定（§19.15.11），`len` 一旦是上界，同一个值就会写出比 `Encode` 路径更宽的头 —— 而 `with` 的全部意义就是与对端同字节|
+|三函数|`encode` / `decode` / `len`|否。`append_with_length_prefix_bounded` 的头宽由传入长度决定（§19.15.11），`len` 一旦是上界，同一个值就会写出比 `Encode` 路径更宽的头 —— 而 `with` 的全部意义就是与对端同字节|
 |生成 wrapper 类型|derive 每成员吐一个 `struct __W<'a>(&'a T)` + `impl Encode`|否。零 API，但每成员约 10 行生成代码，且把 `Encode` 的实现塞进用户 crate 的命名空间|
 |**`Repr` + `to` / `from`**|模块声明 `type Repr`、`fn to(&T) -> Repr`、`fn from(Repr) -> Result<T>`|采用|
 
@@ -4082,13 +3524,13 @@ C++ `FixedConverterPolicy` / `std::span`），Rust 缺的是 derive 的入口。
 |位置|编码|解码|
 |:---|:---|:---|
 |named 必需|`write_named_member(__e, name, &m::to(&self.f))`|`m::from(__m.value(slot, name)?)?`|
-|named `optional`|同上（默认值仍按**字段类型**比较）|`__m.get(slot)`：`Some(p)` → `Decode::decode(Decoder::new(p))`，`None` → `Default`|
+|named `optional`|同上（默认值仍按**字段类型**比较）|`__m.get(slot)`：`Some(p)` → `Decode::decode(p)`，`None` → `Default`|
 |tuple 非末位（auto）|`Encode::encode_auto(&m::to(&self.f), __e)`|`Decode::decode_auto(__d)`|
 |tuple 末位（raw）|`Encode::encode(&m::to(&self.f))`|`Decode::decode`|
 |tuple 的 `Layout::LEN`|`<m::Repr as Layout>::LEN` 参与求和|—|
 
-公开 API 零新增：`write_named_member`、`Encoder::write_prefixed_bounded`、`Decoder::new`、
-`Decoder::with_prefix` 都是现成的。字段类型不必实现 `Layout` —— 那正是孤儿规则下外部类型
+公开 API 零新增：`write_named_member`、`Allocator::append_with_length_prefix_bounded`、`decode`
+与前缀切割都是现成的。字段类型不必实现 `Layout` —— 那正是孤儿规则下外部类型
 （`SystemTime` / `uuid::Uuid` / `Decimal`）的常态，也是这条属性存在的唯一理由。
 
 **代价**：`to()` 必然构造一个 `Repr` 值，`Repr = String` 这类转换会分配。记录在案，不做
@@ -4282,13 +3724,13 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 |门|命令|结果|
 |:---|:---|:---|
-|全量测试（host）|`cargo test --all`|**163 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 147 + doc 4）+ 29 条 compile-fail 快照|
+|全量测试（host）|`cargo test --all`|**165 passed / 0 failed**（lib 单元 1 + `tests/length.rs` 11 + 集成 150 + doc 3）+ 29 条 compile-fail 快照|
 |`no_std + alloc`|`cargo test -p binary --no-default-features`|1 + 11 + doc(4) 通过；六个 `alloc` 容器无条件编译|
 |格式 / lint / 文档|`cargo fmt --all -- --check`、`cargo clippy --all --all-targets -- -D warnings`（含 no-default）、`cargo doc -p binary --no-deps`|全绿、零警告|
-|大端真实二进制|`./scripts/test-multiarch.sh s390x`|163 passed / 0 failed（159 + doc 4）+ ui(29)，`file` 确认真 `ELF 64-bit MSB`|
+|大端真实二进制|`./scripts/test-multiarch.sh s390x`|全绿，`file` 确认真 `ELF 64-bit MSB`|
 |位宽 / 端序交叉|`./scripts/test-multiarch.sh`|x86_64 / armv7 / s390x 全绿，`file` 逐 target 核对 ELF 位宽与端序；缺工具链或构建失败一律非零退出|
 |shell 脚本|`./scripts/check-shell.sh`|`scripts/` 下 5 个 shell 脚本：`bash -n` / `shfmt -d` / `shellcheck -S warning` 零发现|
-|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|各 162 passed / 0 failed（158 + doc 4）；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
+|UB 检查|`./scripts/check-miri.sh`（host + s390x 抽象机）|全绿；ui 按 `#[cfg(not(miri))]` 跳过；未检出 UB|
 |覆盖率|`./scripts/run-coverage.sh`|行覆盖 **90.13%**（2076 行命中 1871、漏 205）：`binary` 14 文件 + `binary-derive`；lcov 落 `target/coverage/lcov.info`，只上报、不设门|
 |CI|`.github/workflows/build.yml`（push 到 `main`）|六个 job：`lint`（fmt / clippy ×2 / doc / shell）、`test`（std 与 no-default）、`msrv`（1.87 check）、`multiarch`（x86_64 / armv7 / s390x）、`miri`、`coverage`（llvm-cov → Coveralls，job 级 `continue-on-error`，不判红）；`workflow_dispatch` 用于不想等 push 时手动整轮|
 |依赖边界|`cargo tree -e normal -p binary`|只有 `binary → binary-derive`；`trybuild` 仅 dev-dependency|
@@ -4303,23 +3745,23 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 | target | Rust triple                     | bits | endian | tests |
 | :----- | :------------------------------ | ---: | :----- | ----: |
-| x86_64 | `x86_64-unknown-linux-gnu`      | 64   | little | 163   |
-| armv7  | `armv7-unknown-linux-gnueabihf` | 32   | little | 163   |
-| s390x  | `s390x-unknown-linux-gnu`       | 64   | big    | 163   |
+| x86_64 | `x86_64-unknown-linux-gnu`      | 64   | little | 165   |
+| armv7  | `armv7-unknown-linux-gnueabihf` | 32   | little | 165   |
+| s390x  | `s390x-unknown-linux-gnu`       | 64   | big    | 165   |
 
 qemu 跑真实 MSB ELF + libc 验**行为与端序**，Miri 解释 MIR 验 `unsafe` 有没有 **UB**，两者
 互补但都不是 soundness 证明（§19.11 / §19.12）。`--no-default-features` 覆盖 `alloc` 层，
 `std` feature 只 gate `HashMap` / `HashSet`；实际只有 `std` / `derive` 两个 feature（§17.5）。
 
 §19.15.9 / §19.15.10 / §19.15.11 三轮只动了安全的编码热路径（一次保留 + 就地写、去掉值前缀
-的子 `Encoder`、已知长度前缀改走一次性预留），没有新增 `unsafe`，当时未重跑 Miri / s390x。
+的子 `Allocator`、已知长度前缀改走一次性预留），没有新增 `unsafe`，当时未重跑 Miri / s390x。
 §19.16 把 `unsafe` 重新搬进 `src/pod.rs`（两处 memcpy 站点，端序从常量改 `cfg!`），因此
 Miri（host + BE 抽象机）与 `scripts/test-multiarch.sh s390x` 都已重跑并全绿。
 §12.5 补 C++ 语料那一轮只加了 fixture 数据与断言（无 `unsafe`、无库代码改动），
 三个检查仍整轮重跑，本表数字是那一轮的（+2 条 `cxx_fixtures`，ui 快照 +4 是 §19.17 留下的）。
 之后 `binary-cxx` 修容器头宽、重生成 `cxx.tsv`（桶列删除，当时 22 条、仍 2 例断言；
 现行为 33 条，见 §12.5），仓库内只动了 tsv 与断言代码，用例数不变，故上表数字沿用。
-§19.15.17 只改了 `Encoder::write` 的 owned 分支与 `write_prefixed_bytes_wide`（安全代码，
+§19.15.17 只改了 `Allocator::append` 的 owned 分支与 `append_prefixed_bytes_wide`（安全代码，
 未新增 `unsafe`），wire 不变；测试、`--no-default-features`、clippy（含 no-default）、doc、
 fmt 整轮重跑全绿。Miri（host + BE 抽象机）与 `scripts/test-multiarch.sh s390x` 也整轮重跑：
 新增的 `test_bulk_write_backend_parity` 在三个环境里都过，未检出 UB。
@@ -4340,7 +3782,7 @@ powerpc 没有 `AtomicU64`，而计数器每次测量前清零，不会溢出）
 随之改为 150 / 149。x86_64 / armv7 / s390x 三个 target 与 Miri（host + BE）都已重跑全绿。
 拒绝 `PhantomData` 那一轮同样只加测试：`tests/derive.rs` 一条（集成 146 → 147）、
 `tests/ui/phantom_data.rs` 一条快照（28 → 29），库代码与 wire 未动；host 全量、三个 target
-与 Miri（host + BE）都已重跑，上表随之改为 163 / ui(29)。
+与 Miri（host + BE）都已重跑，上表随之更新。
 
 覆盖率那一轮只加装置、不动库：`scripts/run-coverage.sh`（`cargo llvm-cov` →
 `target/coverage/lcov.info`，和 `target/` 下其它构建产物一起，不入库）与 CI 的 `coverage`
@@ -4356,14 +3798,13 @@ C++ 侧的 `--exclude '*-tests/*'`：算进来等于把测试与 harness 代码�
 `errors.rs` 1、`derive.rs` 1），行覆盖 85.26% → **90.13%**（2076 行命中 1871、漏 205），
 用例 150 → 162。补的都是**真行为**，不是凑行数：`usize` / `isize` 此前一条用例都没有（连
 `encode` 都没跑过）；`&[u8]` 的 raw 形式、`[String; N]` 的变长头、数组解码中途失败时的 drop、
-`Option` 的未知 tag、`Decoder::peek_byte`（整个函数从未被调用）、borrowed `Encoder` 的
-`finish` 与 `Debug`、owned 编码器写完 128 字节预留之后的批量写、`ErasedError::source`、
-`Error::source` 的 `None` 分支；derive 那边补了 `rename` 的**字面量解析**（转义序列、`\xNN`、
+`Option` 的未知 tag、borrowed `Allocator` 的 `finish` 失败与 `Debug`、owned allocator 写完
+128 字节预留之后的批量写、`Error::source` 的 `None` 分支；derive 那边补了 `rename` 的**字面量解析**（转义序列、`\xNN`、
 `\u{...}`、raw 字符串、续行），这一块以前完全没测过。
 
 剩下 205 行分三类，都不是「少写测试」：`array_len` / `tuple_len` 是 `const fn`，编译期求值，
 运行期命中数恒为 0；`primitives.rs` 那 21 行只在**大端**编译出来（x86_64 上 `cfg!` 走另一支，
-s390x 跑起来才命中）；`Encoder` 的 `LengthTooLarge` 要 >2 GiB 的负载。derive 剩余的一百四十来行
+s390x 跑起来才命中）；`Allocator` 的 `LengthTooLarge` 要 >2 GiB 的负载。derive 剩余的一百四十来行
 基本都是诊断路径，每条要一个 compile-fail fixture 才能命中，收益低于维护 28 份快照的成本，
 这轮没补。
 
@@ -4372,8 +3813,8 @@ commit（`git status` 全为 `??`）—— 首次提交是发布动作，不是�
 
 ### 20.2 已定型、不再重复讨论的决策
 
-- **不做 wire 版本号，也不做版本协商**（§1）；兼容性由 `#[non_exhaustive]` 买单（§18.8.5）。
-- **闭合 `Error` 枚举**：整体擦除成 `dyn Error` 已由 benchmark 否决（§18.8.7 / §19.3）。
+- **不做 wire 版本号，也不做版本协商**（§1）；错误侧的兼容性由变体集合按政策封闭保证（§18.6）。
+- **闭合 `Error` 枚举**：整体擦除成 `dyn Error` 已由 benchmark 否决（§18.1 / §19.3）。
 - **benchmark 只报 raw 形式**（§19.7 / §19.15.2，用户裁定 2026-11-08）：C# / C++ 都没有
   auto 这个被测物，Rust 再报一条只是同一份代码多一次分支或多一个前缀，差值落在噪声里；
   auto 与 raw 的字节关系由 `tests/wire.rs` / `tests/named.rs` 钉住。
@@ -4388,20 +3829,20 @@ commit（`git status` 全为 `??`）—— 首次提交是发布动作，不是�
   `(-length) & 7` 字节尾部余量判断，不用通用 `memmove`，也不采用无 slack 的阶梯搬移
   （§19.15.7，用户裁定 2026-11-08）。理由是 wire 逐字节一致、延迟分布集中，且 100 串
   混合长度实测下均值也更低；「`int64` 大多数情况更优」是已被推翻的旧说法。
-- **一个 `Encoder`，一个后端**：`write_prefixed_bounded` 不建子 `Encoder`、不把上界当预留；
-  超界在事后按 `actual` 判、错误即终止（§19.15.10，用户裁定 2026-11-08）。子 `Encoder`
+- **一个 `Allocator`，一个后端**：`append_with_length_prefix_bounded` 不建子 `Allocator`、不把上界当预留；
+  超界在事后按 `actual` 判、错误即终止（§19.15.10，用户裁定 2026-11-08）。子 `Allocator`
   只在「拿 slice 长度当围栏」时看起来有用，代价是第二个后端判别、把估算变成预留、以及一个
   只为这层存在的 `BufferFull`；实测 borrowed 打平、owned 慢 4~6%，已按此取舍落地。
-- **已知精确长度就一次预留**：`String` / `str` / `[u8]` 及其引用走 `write_prefixed_bytes`，
-  不再用 `write_prefixed_bounded(len, …)`「借」一次预留（§19.15.11，2026-11-08）。后者多一次
+- **已知精确长度就一次预留**：`String` / `str` / `[u8]` 及其引用走 `append_prefixed_bytes`，
+  不再用 `append_with_length_prefix_bounded(len, …)`「借」一次预留（§19.15.11，2026-11-08）。后者多一次
   容量检查、一次 `as_mut_slice`、一次 `pos` 更新，6 字节字符串上贵 2.8 ns；tuple 有 4 个
   变长成员，这一项就是 tuple encode 对 C++ 的 1.75× 里的绝大部分。`Vec<T>` 例外（POD 容器
-  两者等价），`write_prefixed` 的兜底路径也不动。
+  两者等价），`append_with_length_prefix` 的兜底路径也不动。
 - **跨语言 benchmark 在字节层做，`string` 不参与**（§19.15.1，2026-11-08 用户裁定）：
   C# 用 `byte[]`、C++ `std::string` 当 bytes、Rust `&[u8]` / `Vec<u8>`，三边都不转码、不校验。
   三种语言的内存表示不同（UTF-16 / 8 位序列 / UTF-8），同一行被测的东西不一样。不做「三边
   都套 UTF-16 适配器」：那层转码不在任何一边的库热路径上，且 Rust 库外拿不到一次预留的入口
-  （`write_prefixed_bytes` 是 `pub(crate)`），适配器会被 `write_prefixed_bounded` 的 3.6 ns
+  （`append_prefixed_bytes` 是 `pub(crate)`），适配器会被 `append_with_length_prefix_bounded` 的 3.6 ns
   入口税吃掉，偏差比现在更大。Rust ↔ C++ 双边行仍用 `String` / `std::string`。覆盖到哪见 §19.6。
 - **跨语言比值取「各语言最优构建」**：Rust 默认 `--release` 对 C++ `-O3 -flto`（§19.15.11）。
   同配置 LTO/LTO 在这对语言之间测的是构建系统 —— C++ 不开 LTO 会留下跨 TU 的
@@ -4440,13 +3881,13 @@ commit（`git status` 全为 `??`）—— 首次提交是发布动作，不是�
   出现在任何发布的 manifest 里，留着只会让人以为已经配好。stable 不报这条，所以它从来不影响
   质量门，改的只是发布出去的元数据。
 - **缓冲容量由调用方在构造期给上界，库不做增长启发式**（2026-11-08，用户裁定）：编码时
-  payload 已在内存里、长度可预知，`Encoder::with_capacity` / `on_slice`（C++ / C# 的
+  payload 已在内存里、长度可预知，`Allocator::with_capacity` / `on_slice`（C++ / C# 的
   `Allocator` 构造重载同形）是唯一入口，写入路径没有 reserve。估算必须是上界 —— 少算
   1 字节反而比不估更慢（§19.15.15）；超出仍按需增长，只是要付一次 realloc。解码侧没有
   这个信息，所以 §19.15.14 的「扫元素个数预分配」按不做关闭。
-- **owned 后端的大 payload 只写一遍**（§19.15.17，2026-11-08）：`write` 在
+- **owned 后端的大 payload 只写一遍**（§19.15.17，2026-11-08）：`append` 在
   `src.len() >= 256` 时把 payload 追加进 `Vec` 的未初始化余量（`extend_from_slice`），不再
-  `resize` 清零后覆盖；`write_prefixed_bytes_wide` 拆成「4 字节头 + 批量 payload」。水位线、
+  `resize` 清零后覆盖；`append_prefixed_bytes_wide` 拆成「4 字节头 + 批量 payload」。水位线、
   `finish` 截断与 wire 都不变，只是把 C++ / C# 一直就有的 `bounds` / `offset` 分离补上。
 - **解码出拥有型 `String` 的分配与 UTF-8 校验是用法取舍，不是库的设计缺口**
   （2026-11-08，用户裁定）：`decode tuple` 的 94.1 ns 里 60 ns 是 4 次 `String` 分配加 4 次

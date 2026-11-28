@@ -2,18 +2,18 @@
 //! those of `T`, in raw, prefixed, and one-shot (also raw) positions. See
 //! `binary::smart_ptr` (module docs) and `DESIGN.md` §9 / §13 / §17.3.
 
-use binary::{from_slice, to_vec, write_named_member, Decode, Encode, Encoder, Layout};
+use binary::{from_slice, to_vec, write_named_member, Allocator, Decode, Encode, Layout};
 use std::rc::Rc;
 use std::sync::Arc;
 
 fn raw<T: Encode + ?Sized>(v: &T) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode(&mut e).unwrap();
     e.finish().unwrap()
 }
 
 fn named_bytes<T: Encode + ?Sized>(v: &T) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     write_named_member(&mut e, b"x", v).unwrap();
     e.finish().unwrap()
 }
@@ -90,8 +90,8 @@ fn test_smart_ptrs_forward_encode_auto_overrides() {
 
 #[test]
 fn test_smart_ptrs_forward_encode_with_prefix_overrides() {
-    // `write_named_member` always prefixes; `String` has an O(1) write_prefixed_bounded
-    // override that a default-method forward would lose (`write_prefixed` fallback).
+    // `write_named_member` always prefixes; `String` has an O(1) append_with_length_prefix_bounded
+    // override that a default-method forward would lose (`append_with_length_prefix` fallback).
     let inner = String::from("abc");
     let expected = named_bytes(&inner);
     assert_eq!(named_bytes(&Box::new(inner.clone())), expected);

@@ -16,7 +16,7 @@
 //! borrowed buffer, `min` over 7 rounds of 50 ms, `black_box` on every result.
 //! Rows are the raw form only — see `wire`'s module docs for why (§19.15.2).
 
-use binary::{Decode, Decoder, Encode, Encoder};
+use binary::{Allocator, Decode, Encode};
 
 use crate::harness::{bench, bench_ret, header};
 use crate::wire::{hex, named_value, tuple_value, Type01, TypeX1};
@@ -58,14 +58,14 @@ fn tuple_object_value() -> Type01Tuple {
 /// Borrowed backend, no growth: overflow is `Error::BufferFull`, same contract
 /// as C++ `Allocator(span)`.
 fn encode_raw<T: Encode + ?Sized>(value: &T, buf: &mut [u8]) -> usize {
-    let mut e = Encoder::on_slice(buf);
+    let mut e = Allocator::on_slice(buf);
     value.encode(&mut e).expect("1024 bytes is enough");
     e.len()
 }
 
 fn decode_raw<'a, T: Decode<'a>>(bytes: &'a [u8]) -> T {
-    let mut d = Decoder::new(bytes);
-    T::decode(&mut d).expect("encoded above")
+    let buf: &[u8] = bytes;
+    T::decode(buf).expect("encoded above")
 }
 
 pub fn run() {
@@ -142,8 +142,8 @@ pub fn run() {
     // the row itself is what name lookup costs on each side (§19.15.4 measured
     // 7.5 ns for the same thing; this is the same-session control).
     bench("named parse only (4 names)", || {
-        let mut d = Decoder::new(std::hint::black_box(&named_raw[..]));
-        let members = binary::NamedMembers::<4>::parse(&mut d, |name| match name {
+        let buf: &[u8] = std::hint::black_box(&named_raw[..]);
+        let members = binary::NamedMembers::<4>::parse(buf, |name| match name {
             b"Id" => Some(0),
             b"Name" => Some(1),
             b"List" => Some(2),
@@ -153,18 +153,18 @@ pub fn run() {
         .expect("encoded above");
         std::hint::black_box(members.get(3));
     });
-    // The ergonomic path: a fresh `Encoder` per call, i.e. what a caller gets
+    // The ergonomic path: a fresh `Allocator` per call, i.e. what a caller gets
     // without hand-managing a buffer. C++ `Allocator()` (heap) is the same
     // shape; C# `Encode(T)` returning `byte[]` too.
     bench_ret("encode tuple (owned Vec)", || {
-        let mut e = Encoder::new();
+        let mut e = Allocator::new();
         std::hint::black_box(&tuple)
             .encode_auto(&mut e)
             .expect("infallible");
         std::hint::black_box(e).finish().expect("owned")
     });
     bench_ret("encode named (owned Vec)", || {
-        let mut e = Encoder::new();
+        let mut e = Allocator::new();
         std::hint::black_box(&named)
             .encode_auto(&mut e)
             .expect("infallible");
@@ -174,14 +174,14 @@ pub fn run() {
     // Scalar baseline: if a single `i32` is far off a memcpy, the harness is
     // the problem, not the object layer.
     bench("encode i32 (raw)", || {
-        let mut e = Encoder::on_slice(&mut buf);
+        let mut e = Allocator::on_slice(&mut buf);
         std::hint::black_box(1024i32).encode(&mut e).expect("fits");
         std::hint::black_box(e.len());
     });
 
     let scalar = [0x00u8, 0x04, 0x00, 0x00];
     bench_ret("decode i32 (raw)", || {
-        let mut d = Decoder::new(std::hint::black_box(&scalar));
-        <i32 as Decode>::decode(&mut d).expect("4 bytes")
+        let buf: &[u8] = std::hint::black_box(&scalar);
+        <i32 as Decode>::decode(buf).expect("4 bytes")
     });
 }

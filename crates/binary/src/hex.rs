@@ -1,6 +1,6 @@
 //! Hex preview shared by the `Debug` impls.
 //!
-//! Wire bugs are byte bugs: printing `Encoder { len: 17 }` without the bytes
+//! Wire bugs are byte bugs: printing `Allocator { len: 17 }` without the bytes
 //! leaves the reader to reconstruct them from memory. A capped hex dump is the
 //! one piece of state that actually explains a mismatch, and it stays small
 //! enough to read in a panic message.

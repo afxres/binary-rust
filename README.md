@@ -34,7 +34,7 @@ containers keep working, and `cargo test -p binary --no-default-features` is par
 ## Basic Usage
 
 ```rust
-use binary::{Decode, Encode, Decoder, Encoder, from_slice, to_vec};
+use binary::{Decode, Encode, Allocator, from_slice, to_vec};
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 struct Person {
@@ -56,39 +56,40 @@ fn main() {
 
 `to_vec` / `from_slice` are the one-shot helpers: they allocate, write a **raw** value (no length
 prefix of its own) and require the whole buffer to be consumed. When the allocation matters, drive
-the encoder over a caller-provided slice instead:
+the allocator over a caller-provided slice instead:
 
 ```rust
 let person = Person { id: 7, name: "Alice".to_owned(), age: 30 };
 
 let mut scratch = [0u8; 256];
-let mut encoder = Encoder::on_slice(&mut scratch);
-person.encode(&mut encoder).unwrap();
-let written = encoder.len();
+let mut allocator = Allocator::on_slice(&mut scratch);
+person.encode(&mut allocator).unwrap();
+let written = allocator.len();
 let bytes = &scratch[..written];
 
-let mut decoder = Decoder::new(bytes);
-let back = Person::decode(&mut decoder).unwrap();
-assert_eq!(decoder.remaining(), 0);
+let back = Person::decode(bytes).unwrap();
 ```
 
 A value stored inside a container, or concatenated with its own length prefix, uses the `auto`
 position — `encode_auto` / `decode_auto`. That is what containers and `Option<T>` call internally,
-and it is how a run of values is written and read back one at a time:
+and it is how a run of values is written and read back one at a time. On the read side there is no
+decoder type: a cursor is a plain `&mut &[u8]`, advanced by the free functions in `binary`
+(`decode`, `decode_with_length_prefix`); the write-side counterpart for a payload that is
+already a byte slice is `encode_with_length_prefix`:
 
 ```rust
 let people = vec![Person { id: 1, name: "A".to_owned(), age: 0 }];
 
-let mut encoder = Encoder::new();
+let mut allocator = Allocator::new();
 for person in &people {
-    person.encode_auto(&mut encoder).unwrap();
+    person.encode_auto(&mut allocator).unwrap();
 }
-let buffer = encoder.finish().unwrap();
+let buffer = allocator.finish().unwrap();
 
-let mut decoder = Decoder::new(&buffer);
+let mut rest: &[u8] = &buffer;
 let mut result = Vec::new();
-while decoder.remaining() > 0 {
-    result.push(Person::decode_auto(&mut decoder).unwrap());
+while !rest.is_empty() {
+    result.push(Person::decode_auto(&mut rest).unwrap());
 }
 assert_eq!(result, people);
 ```
@@ -166,8 +167,8 @@ extra annotation; maps and sets are written as `(K, V)` entries. Decoding a borr
   All four are byte-compatible with the corresponding C# and C++ converters.
 - **Structural forward compatibility**: an unknown member name is skipped on decode, so new optional
   members can be added without breaking old data. No version number, no negotiation.
-- **Zero copy on the read path** for `&str` and `&[u8]`, plus a borrowed encoder backend
-  (`Encoder::on_slice`) that never allocates.
+- **Zero copy on the read path** for `&str` and `&[u8]`, plus a borrowed allocator backend
+  ( `Allocator::on_slice`) that never allocates.
 - **The public API is safe Rust**: `unsafe` is confined to the bulk-copy module and two internal
   helpers (fixed-array initialisation, prefix compaction).
 - **`no_std` + `alloc`**, verified without default features.

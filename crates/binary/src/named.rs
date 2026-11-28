@@ -17,19 +17,18 @@
 //! (`DESIGN.md` §19.4).
 //!
 //! The protocol is two free functions, [`write_named_member`] and
-//! [`read_named_member`], not methods on [`Encoder`] / [`Decoder`]: a member is
+//! [`read_named_member`], not methods on the allocator: a member is
 //! not a byte-cursor operation, and hanging it on the cursor types read as a
 //! privilege granted to one object shape. Each half exists in exactly one
 //! function, so a name without a value has no expressible path.
 //!
-//! The object level is asymmetric on purpose. Writing streams, so one [`Encoder`]
+//! The object level is asymmetric on purpose. Writing streams, so one [`Allocator`]
 //! used repeatedly *is* the object; reading has to buffer every member before a
 //! field can be decoded, since member order is not part of the format, and that
 //! buffer is [`NamedMembers`].
 
+use crate::allocator::Allocator;
 use crate::codec::{Decode, Encode};
-use crate::decoder::Decoder;
-use crate::encoder::Encoder;
 use crate::error::{Error, Result};
 
 /// Write one named-object member: `prefix(name) name prefix(value) value`.
@@ -38,16 +37,16 @@ use crate::error::{Error, Result};
 /// even for types with `LEN > 0`, so this calls [`Encode::encode_with_prefix`]
 /// directly instead of `auto`.
 ///
-/// A free function rather than a method on [`Encoder`]: a member is not a
+/// A free function rather than a method on [`Allocator`]: a member is not a
 /// byte-cursor operation, and hanging it on the cursor would read as a privilege
 /// granted to one object shape.
 #[inline]
 pub fn write_named_member<T: Encode + ?Sized>(
-    e: &mut Encoder<'_>,
+    e: &mut Allocator<'_>,
     name: &[u8],
     value: &T,
 ) -> Result<()> {
-    e.write_prefixed_bytes(name)?;
+    e.append_prefixed_bytes(name)?;
     value.encode_with_prefix(e)
 }
 
@@ -57,9 +56,9 @@ pub fn write_named_member<T: Encode + ?Sized>(
 /// here, so the caller decodes the payload with `T::decode`, never `auto`. The
 /// read half of [`write_named_member`].
 #[inline]
-pub fn read_named_member<'a>(d: &mut Decoder<'a>) -> Result<(&'a [u8], &'a [u8])> {
-    let name = d.read_prefix()?;
-    let value = d.read_prefix()?;
+pub fn read_named_member<'a>(buf: &mut &'a [u8]) -> Result<(&'a [u8], &'a [u8])> {
+    let name = crate::converter::decode_with_length_prefix(buf)?;
+    let value = crate::converter::decode_with_length_prefix(buf)?;
     Ok((name, value))
 }
 
@@ -78,18 +77,21 @@ impl<'a, const N: usize> NamedMembers<'a, N> {
     /// `find` maps a wire name to a declaration index (a generated `match` in the
     /// derive macro). Unknown names are skipped for forward compatibility;
     /// a known name appearing twice is an error.
-    pub fn parse(d: &mut Decoder<'a>, find: impl Fn(&'a [u8]) -> Option<usize>) -> Result<Self> {
+    pub fn parse(payload: &'a [u8], find: impl Fn(&'a [u8]) -> Option<usize>) -> Result<Self> {
         let mut slots: [Option<&'a [u8]>; N] = [None; N];
-        while d.remaining() > 0 {
-            let (name, value) = read_named_member(d)?;
+        let mut cur = payload;
+        while !cur.is_empty() {
+            let (name, value) = read_named_member(&mut cur)?;
             let Some(index) = find(name) else {
                 continue;
             };
             if index >= N {
-                return Err(Error::InvalidMemberIndex);
+                // A `find` table answering with an out-of-range index is an
+                // invariant violation of the generated code, not bad input.
+                return Err(Error::message_static("invalid member index"));
             }
             if slots[index].is_some() {
-                return Err(Error::DuplicateMember);
+                return Err(Error::message_static("duplicate named member"));
             }
             slots[index] = Some(value);
         }
@@ -105,21 +107,24 @@ impl<'a, const N: usize> NamedMembers<'a, N> {
     /// Raw value payload of a required member.
     #[inline]
     pub fn require(&self, index: usize, name: &'static str) -> Result<&'a [u8]> {
-        self.get(index).ok_or(Error::MissingMember(name))
+        // `ok_or_else`, not `ok_or`: the message is formatted lazily, so the
+        // success path stays allocation-free.
+        self.get(index)
+            .ok_or_else(|| Error::message(format_args!("missing required member: {name}")))
     }
 
     /// Decode a required member. Raw `T::decode`, without reading another prefix.
     #[inline]
     pub fn value<T: Decode<'a>>(&self, index: usize, name: &'static str) -> Result<T> {
         let payload = self.require(index, name)?;
-        T::decode(&mut Decoder::new(payload))
+        T::decode(payload)
     }
 
     /// Decode an optional member; a missing member yields `T::default()`.
     #[inline]
     pub fn optional<T: Decode<'a> + Default>(&self, index: usize) -> Result<T> {
         match self.get(index) {
-            Some(payload) => T::decode(&mut Decoder::new(payload)),
+            Some(payload) => T::decode(payload),
             None => Ok(T::default()),
         }
     }

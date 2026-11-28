@@ -1,9 +1,9 @@
 //! Base wire tests: integers, strings, containers, and the prefix /
-//! `write_prefixed` boundaries.
+//! `append_with_length_prefix` boundaries.
 
 mod common;
 
-use binary::{Decode, Decoder, Encode, Encoder, Error, Layout};
+use binary::{Allocator, Decode, Encode, Error, Layout};
 use common::*;
 
 /// Test-local copy of the prefix compaction threshold. The library keeps it
@@ -45,11 +45,11 @@ fn test_string() {
 
 #[test]
 fn test_str_borrowed() {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     "test".encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
-    let mut d = Decoder::new(&bytes);
-    let s: &str = Decode::decode_auto(&mut d).unwrap();
+    let mut buf: &[u8] = &bytes;
+    let s: &str = Decode::decode_auto(&mut buf).unwrap();
     assert_eq!(s, "test");
 }
 
@@ -115,11 +115,11 @@ fn test_bulk_and_loop_containers_are_byte_identical() {
 
 #[test]
 fn test_byte_slice_borrowed() {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     [1u8, 2, 3, 4][..].encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
-    let mut d = Decoder::new(&bytes);
-    let s: &[u8] = Decode::decode_auto(&mut d).unwrap();
+    let mut buf: &[u8] = &bytes;
+    let s: &[u8] = Decode::decode_auto(&mut buf).unwrap();
     assert_eq!(s, &[1, 2, 3, 4]);
 }
 
@@ -169,7 +169,7 @@ fn test_wide_tuple_last_member_is_raw() {
     assert_eq!(round_trip(&v), v);
     assert_eq!(round_trip_raw(&v), v);
 
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode(&mut e).unwrap();
     assert_eq!(e.finish().unwrap(), [1, 2, 3, 4, 5, b'x']);
 
@@ -215,10 +215,10 @@ fn test_ten_element_tuple_matches_csharp() {
     assert_eq!(round_trip(&v), v);
 
     // ... and the bytes C# produced decode back to the same value.
-    let mut d = Decoder::new(&expected);
-    let back: T = Decode::decode_auto(&mut d).unwrap();
+    let mut buf: &[u8] = &expected;
+    let back: T = Decode::decode_auto(&mut buf).unwrap();
     assert_eq!(back, v);
-    assert_eq!(d.remaining(), 0);
+    assert_eq!(buf.len(), 0);
 }
 
 #[test]
@@ -241,16 +241,16 @@ fn test_nested() {
 fn test_decode_encode_idempotent() {
     // decode → encode should produce the same bytes
     let original = "Hello, World!";
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     original.encode_auto(&mut e).unwrap();
     let bytes1 = e.finish().unwrap();
 
     // decode
-    let mut d = Decoder::new(&bytes1);
-    let s: String = Decode::decode_auto(&mut d).unwrap();
+    let mut buf: &[u8] = &bytes1;
+    let s: String = Decode::decode_auto(&mut buf).unwrap();
 
     // re-encode
-    let mut e2 = Encoder::new();
+    let mut e2 = Allocator::new();
     s.encode_auto(&mut e2).unwrap();
     let bytes2 = e2.finish().unwrap();
 
@@ -260,11 +260,11 @@ fn test_decode_encode_idempotent() {
 #[test]
 fn test_borrowed_encoder_full() {
     let mut buf = [0u8; 4];
-    let mut e = Encoder::on_slice(&mut buf);
-    e.write(&[1, 2, 3, 4]).unwrap();
+    let mut e = Allocator::on_slice(&mut buf);
+    e.append(&[1, 2, 3, 4]).unwrap();
     // A distinct variant, not just "some error": the caller can tell "my buffer
     // is too small" from "the data is bad".
-    assert_eq!(e.write(&[5]).unwrap_err(), Error::BufferFull);
+    assert_eq!(e.append(&[5]).unwrap_err(), Error::BufferFull);
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn test_large_string() {
 fn test_long_prefix_boundary() {
     // 127 bytes → 1-byte prefix
     let s127 = "x".repeat(127);
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     s127.encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
     assert_eq!(bytes[0], 127);
@@ -285,7 +285,7 @@ fn test_long_prefix_boundary() {
 
     // 128 bytes → 4-byte prefix
     let s128 = "x".repeat(128);
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     s128.encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
     assert_eq!(bytes[0] & 0x80, 0x80);
@@ -295,53 +295,114 @@ fn test_long_prefix_boundary() {
 #[test]
 fn test_empty_decode_error() {
     // decode empty → should error
-    let mut d = Decoder::new(&[]);
-    let result = String::decode_auto(&mut d);
+    let mut buf: &[u8] = &[];
+    let result = String::decode_auto(&mut buf);
     assert!(result.is_err());
 }
 
 #[test]
-fn test_write_prefixed_bounded_scope() {
-    // Encoder side uses write_prefixed_bounded; decoder side still has with_prefix.
-    let mut e = Encoder::new();
-    e.write_prefixed_bounded(5, |e| e.write(b"hello")).unwrap();
+fn test_append_with_length_prefix_bounded_scope() {
+    // Allocator side uses `append_with_length_prefix_bounded`; the declared
+    // payload comes back through `decode_with_length_prefix`.
+    let mut e = Allocator::new();
+    e.append_with_length_prefix_bounded(5, |e| e.append(b"hello"))
+        .unwrap();
     let bytes = e.finish().unwrap();
     assert_eq!(bytes, &[5, b'h', b'e', b'l', b'l', b'o']);
 
-    let mut d = Decoder::new(&bytes);
-    let result: String = d
-        .with_prefix(|d| {
-            let s = d.take(5)?;
-            String::from_utf8(s.to_vec()).map_err(|_| Error::message_static("bad utf-8"))
-        })
-        .unwrap();
+    let mut buf: &[u8] = &bytes;
+    let payload = binary::decode_with_length_prefix(&mut buf).unwrap();
+    let result = core::str::from_utf8(payload).unwrap();
     assert_eq!(result, "hello");
+    assert_eq!(buf.len(), 0);
 }
 
 #[test]
-fn test_write_prefixed_shrink_boundary() {
-    // Up to PREFIX_SHRINK_LIMIT the `write_prefixed` path compacts to a 1-byte header;
+fn test_encode_with_length_prefix_roundtrip() {
+    // Payload <= 127 writes the 1-byte header.
+    let mut e = Allocator::new();
+    binary::encode_with_length_prefix(&mut e, b"hello").unwrap();
+    assert_eq!(e.finish().unwrap(), &[5, b'h', b'e', b'l', b'l', b'o']);
+
+    // Payload > 127 writes the fixed 4-byte header with bit 31 set.
+    let payload = vec![0x7Fu8; 128];
+    let mut e = Allocator::new();
+    binary::encode_with_length_prefix(&mut e, &payload).unwrap();
+    let bytes = e.finish().unwrap();
+    assert_eq!(&bytes[..4], &[0x80, 0x00, 0x00, 128]);
+    assert_eq!(&bytes[4..], payload.as_slice());
+
+    // Both come back through the read half.
+    let mut buf: &[u8] = &bytes;
+    assert_eq!(
+        binary::decode_with_length_prefix(&mut buf).unwrap(),
+        payload.as_slice()
+    );
+    assert_eq!(buf.len(), 0);
+
+    // Empty payload still writes the prefix.
+    let mut e = Allocator::new();
+    binary::encode_with_length_prefix(&mut e, b"").unwrap();
+    assert_eq!(e.finish().unwrap(), &[0]);
+}
+
+#[test]
+fn test_span_variants_compose_from_the_slice_api() {
+    // C# `Encode(Span<byte>, int, out bytesWritten)` / `Decode(span, out bytesRead)`
+    // have no free-function counterpart; both compose from the slice API.
+    let mut buf = [0u8; 8];
+    let mut a = Allocator::on_slice(&mut buf);
+    binary::encode(&mut a, 200).unwrap();
+    assert_eq!(a.len(), 4);
+    assert_eq!(&buf[..4], &[0x80, 0x00, 0x00, 200]);
+
+    // Reading without advancing: decode on a copy, report the header width.
+    let mut probe: &[u8] = &buf[..4];
+    assert_eq!(binary::decode(&mut probe).unwrap(), 200);
+    assert_eq!(4 - probe.len(), 4);
+
+    // Narrow header: one byte written, one byte read.
+    assert_eq!(binary::encode_prefix(&mut buf[4..], 7).unwrap(), 1);
+    let mut probe: &[u8] = &buf[4..5];
+    assert_eq!(binary::decode(&mut probe).unwrap(), 7);
+    assert_eq!(1 - probe.len(), 1);
+}
+
+#[test]
+fn test_encode_with_length_prefix_borrowed_overflow() {
+    // A borrowed buffer reports BufferFull before any byte is written.
+    let mut backing = [0u8; 4];
+    let mut e = Allocator::on_slice(&mut backing);
+    assert_eq!(
+        binary::encode_with_length_prefix(&mut e, b"12345"),
+        Err(Error::BufferFull)
+    );
+}
+
+#[test]
+fn test_append_with_length_prefix_shrink_boundary() {
+    // Up to PREFIX_SHRINK_LIMIT the `append_with_length_prefix` path compacts to a 1-byte header;
     // above it the reserved 4-byte header is kept. This threshold is a wire
     // contract shared with C# (`Limits = 16`) and C++
     // (`AllocatorAnchorShrinkLimits = 16`), pinned by the two byte-level
     // assertions below rather than by naming a library constant.
     let at_limit = Unpredictable(vec![0xAB; PREFIX_SHRINK_LIMIT]);
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     at_limit.encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
     assert_eq!(bytes[0] as usize, PREFIX_SHRINK_LIMIT, "16 → 1-byte header");
     assert_eq!(bytes.len(), 1 + PREFIX_SHRINK_LIMIT);
 
     let over = Unpredictable(vec![0xAB; PREFIX_SHRINK_LIMIT + 1]);
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     over.encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
     assert_eq!(&bytes[..4], &[0x80, 0x00, 0x00, 0x11], "17 → 4-byte header");
     assert_eq!(bytes.len(), 4 + PREFIX_SHRINK_LIMIT + 1);
 
     let decoded: Unpredictable = {
-        let mut d = Decoder::new(&bytes);
-        Decode::decode_auto(&mut d).unwrap()
+        let mut buf: &[u8] = &bytes;
+        Decode::decode_auto(&mut buf).unwrap()
     };
     assert_eq!(decoded.0.len(), PREFIX_SHRINK_LIMIT + 1);
 }
@@ -351,12 +412,12 @@ fn test_write_prefixed_shrink_boundary() {
 /// (9..=16) where the second block's destination overlaps the first block's
 /// source. 17 keeps the wide header.
 #[test]
-fn test_write_prefixed_u64_moves_all_lengths() {
+fn test_append_with_length_prefix_u64_moves_all_lengths() {
     for len in 0..=PREFIX_SHRINK_LIMIT + 1 {
         let payload: Vec<u8> = (0..len)
             .map(|i| (i as u8).wrapping_mul(37).wrapping_add(0x5a))
             .collect();
-        let mut e = Encoder::new();
+        let mut e = Allocator::new();
         Unpredictable(payload.clone()).encode_auto(&mut e).unwrap();
         let bytes = e.finish().unwrap();
 
@@ -377,8 +438,8 @@ fn test_write_prefixed_u64_moves_all_lengths() {
             assert_eq!(&bytes[4..], &payload[..], "len {len}: payload");
         }
 
-        let mut d = Decoder::new(&bytes);
-        let decoded: Unpredictable = Decode::decode_auto(&mut d).unwrap();
+        let mut buf: &[u8] = &bytes;
+        let decoded: Unpredictable = Decode::decode_auto(&mut buf).unwrap();
         assert_eq!(decoded.0, payload, "len {len}: round trip");
     }
 }
@@ -387,14 +448,14 @@ fn test_write_prefixed_u64_moves_all_lengths() {
 /// when `bounds - offset < ((-length) & 7)`; both widths must decode. Sizing
 /// the buffer up front keeps this on the compacting path.
 #[test]
-fn test_write_prefixed_borrowed_tail_margin() {
+fn test_append_with_length_prefix_borrowed_tail_margin() {
     for len in 0..=PREFIX_SHRINK_LIMIT {
         let payload: Vec<u8> = (0..len).map(|i| (i as u8) ^ 0xa5).collect();
         let pad = (8 - (len & 7)) & 7;
 
         // Roomy buffer: same fast path as the owned backend, always compacts.
         let mut roomy = vec![0xcc; 64];
-        let mut e = Encoder::on_slice(&mut roomy);
+        let mut e = Allocator::on_slice(&mut roomy);
         Unpredictable(payload.clone()).encode_auto(&mut e).unwrap();
         assert_eq!(e.as_bytes()[0] as usize, len, "len {len}: roomy compacts");
         assert_eq!(&e.as_bytes()[1..], &payload[..], "len {len}: roomy payload");
@@ -402,7 +463,7 @@ fn test_write_prefixed_borrowed_tail_margin() {
         // One byte short of the required margin: the 4-byte header is kept.
         if pad > 0 {
             let mut tight = vec![0xcc; 4 + len + pad - 1];
-            let mut e = Encoder::on_slice(&mut tight);
+            let mut e = Allocator::on_slice(&mut tight);
             Unpredictable(payload.clone()).encode_auto(&mut e).unwrap();
             assert_eq!(
                 &e.as_bytes()[..4],
@@ -410,14 +471,14 @@ fn test_write_prefixed_borrowed_tail_margin() {
                 "len {len}: insufficient margin keeps wide header"
             );
             assert_eq!(&e.as_bytes()[4..], &payload[..], "len {len}: wide payload");
-            let mut d = Decoder::new(e.as_bytes());
-            let decoded: Unpredictable = Decode::decode_auto(&mut d).unwrap();
+            let mut buf: &[u8] = e.as_bytes();
+            let decoded: Unpredictable = Decode::decode_auto(&mut buf).unwrap();
             assert_eq!(decoded.0, payload, "len {len}: wide round trip");
         }
 
         // Exactly enough margin: compacts.
         let mut exact = vec![0xcc; 4 + len + pad];
-        let mut e = Encoder::on_slice(&mut exact);
+        let mut e = Allocator::on_slice(&mut exact);
         Unpredictable(payload.clone()).encode_auto(&mut e).unwrap();
         assert_eq!(
             e.as_bytes()[0] as usize,
@@ -429,15 +490,15 @@ fn test_write_prefixed_borrowed_tail_margin() {
 }
 
 #[test]
-fn test_write_prefixed_wire_matches_csharp() {
+fn test_append_with_length_prefix_wire_matches_csharp() {
     // Real C# output for List<string>{"aaaa","bbbb","cccc","dddd"} is
     // `80 00 00 14 | 04 "aaaa" | 04 "bbbb" | 04 "cccc" | 04 "dddd"`:
-    // the element payload totals 20 bytes, so `write_prefixed` keeps the 4-byte form.
+    // the element payload totals 20 bytes, so `append_with_length_prefix` keeps the 4-byte form.
     let v: Vec<String> = ["aaaa", "bbbb", "cccc", "dddd"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
     assert_eq!(&bytes[..4], &[0x80, 0x00, 0x00, 0x14]);
@@ -445,68 +506,68 @@ fn test_write_prefixed_wire_matches_csharp() {
 }
 
 #[test]
-fn test_write_prefixed_path() {
-    // No O(1) length estimate → default encode_with_prefix uses the `write_prefixed` path.
+fn test_append_with_length_prefix_path() {
+    // No O(1) length estimate → default encode_with_prefix uses the `append_with_length_prefix` path.
     let v = Unpredictable(vec![1u8, 2, 3, 4, 5]);
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode_auto(&mut e).unwrap();
     let bytes = e.finish().unwrap();
 
-    let mut d = Decoder::new(&bytes);
-    let decoded: Unpredictable = Decode::decode_auto(&mut d).unwrap();
+    let mut buf: &[u8] = &bytes;
+    let decoded: Unpredictable = Decode::decode_auto(&mut buf).unwrap();
     assert_eq!(decoded.0, vec![1u8, 2, 3, 4, 5]);
 }
 
 #[test]
-fn test_write_prefixed_bounded_writes_actual_length() {
+fn test_append_with_length_prefix_bounded_writes_actual_length() {
     // The estimate is an upper bound; only bytes actually written count.
-    let mut e = Encoder::new();
-    e.write_prefixed_bounded(8, |e| e.write(&[1u8, 2, 3, 4]))
+    let mut e = Allocator::new();
+    e.append_with_length_prefix_bounded(8, |e| e.append(&[1u8, 2, 3, 4]))
         .unwrap();
     // 1-byte header (estimate 8 <= 127) + 4 bytes actually written
     assert_eq!(e.finish().unwrap(), &[4, 1, 2, 3, 4]);
 }
 
 #[test]
-fn test_write_prefixed_bounded_overshoot_is_an_error() {
+fn test_append_with_length_prefix_bounded_overshoot_is_an_error() {
     // `max_len` is a bound, not a reservation: `f` writes into the encoder
     // itself, so a payload bigger than the declared bound can only be rejected
     // afterwards. That is a caller bug, not bad data, and the error is terminal
     // (the header was never filled in) — the same class as a failed
-    // `write_prefixed`. What matters here is that it is *reported*: the old
+    // `append_with_length_prefix`. What matters here is that it is *reported*: the old
     // bounded sub-encoder returned `BufferFull`, which claims the caller's
     // buffer is too small, and an owned encoder has no such buffer.
-    let mut e = Encoder::new();
-    e.write(&[0xAA]).unwrap();
+    let mut e = Allocator::new();
+    e.append(&[0xAA]).unwrap();
     let err = e
-        .write_prefixed_bounded(2, |e| e.write(&[1u8, 2, 3]))
+        .append_with_length_prefix_bounded(2, |e| e.append(&[1u8, 2, 3]))
         .unwrap_err();
     assert!(matches!(err, Error::Message(_)), "{err:?}");
 }
 
 #[test]
-fn test_write_prefixed_bounded_estimate_is_not_charged_to_borrowed_space() {
+fn test_append_with_length_prefix_bounded_estimate_is_not_charged_to_borrowed_space() {
     // An over-estimate must not decide whether a borrowed encoder accepts the
     // payload: only the bytes `f` writes are checked against `buf.len()`. The
     // estimate stops at the 1-byte-header range (127) on purpose — a wider
     // estimate legitimately needs a 4-byte header, which this buffer cannot hold.
     // (Charging `max_len` to the buffer used to fail here with BufferFull.)
     let mut buf = [0u8; 6];
-    let mut e = Encoder::on_slice(&mut buf);
-    e.write_prefixed_bounded(127, |e| e.write(b"hello"))
+    let mut e = Allocator::on_slice(&mut buf);
+    e.append_with_length_prefix_bounded(127, |e| e.append(b"hello"))
         .unwrap();
     assert_eq!(e.as_bytes(), &[5, b'h', b'e', b'l', b'l', b'o']);
 }
 
 #[test]
-fn test_write_prefixed_bounded_inner_failure_propagates() {
+fn test_append_with_length_prefix_bounded_inner_failure_propagates() {
     // A genuine BufferFull from `f` — the buffer really is too small — comes
     // straight back, exactly as it would from a bare `write`.
     let mut buf = [0u8; 4];
-    let mut e = Encoder::on_slice(&mut buf);
-    e.write(&[0xAA]).unwrap();
+    let mut e = Allocator::on_slice(&mut buf);
+    e.append(&[0xAA]).unwrap();
     let err = e
-        .write_prefixed_bounded(8, |e| e.write(&[1u8, 2, 3, 4]))
+        .append_with_length_prefix_bounded(8, |e| e.append(&[1u8, 2, 3, 4]))
         .unwrap_err();
     assert_eq!(err, Error::BufferFull);
 }
@@ -527,11 +588,11 @@ fn test_tuple_flatten_equals_nested() {
         "login".to_string(),
     );
 
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     nested.encode(&mut e).unwrap();
     let nested_bytes = e.finish().unwrap();
 
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     flat.encode(&mut e).unwrap();
     let flat_bytes = e.finish().unwrap();
 
@@ -546,12 +607,12 @@ fn test_tuple_flatten_equals_nested() {
     assert_eq!(flat_bytes, expected, "flat tuple wire");
 
     // Both types decode a payload written by the other.
-    let mut d = Decoder::new(&nested_bytes);
-    let decoded_flat = <(i64, i32, String, i32, String)>::decode(&mut d).unwrap();
+    let buf: &[u8] = &nested_bytes;
+    let decoded_flat = <(i64, i32, String, i32, String)>::decode(buf).unwrap();
     assert_eq!(decoded_flat, flat);
 
-    let mut d = Decoder::new(&flat_bytes);
-    let decoded_nested = <((i64, i32), (String, i32), String)>::decode(&mut d).unwrap();
+    let buf: &[u8] = &flat_bytes;
+    let decoded_nested = <((i64, i32), (String, i32), String)>::decode(buf).unwrap();
     assert_eq!(decoded_nested, nested);
 }
 
@@ -569,9 +630,9 @@ fn test_no_recursive_length_prediction() {
     }
 
     impl Encode for Counting {
-        fn encode(&self, e: &mut Encoder<'_>) -> Result<(), Error> {
+        fn encode(&self, e: &mut Allocator<'_>) -> Result<(), Error> {
             self.calls.set(self.calls.get() + 1);
-            e.write(&[1, 2])
+            e.append(&[1, 2])
         }
     }
 
@@ -585,7 +646,7 @@ fn test_no_recursive_length_prediction() {
             calls: Rc::clone(&calls),
         },
     ];
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode_auto(&mut e).unwrap();
     assert_eq!(e.finish().unwrap(), vec![6, 2, 1, 2, 2, 1, 2]);
     assert_eq!(calls.get(), 2);
@@ -601,7 +662,7 @@ fn test_no_recursive_length_prediction() {
         },
     ];
     let outer = vec![inner];
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     outer.encode_auto(&mut e).unwrap();
     assert_eq!(e.finish().unwrap(), vec![7, 6, 2, 1, 2, 2, 1, 2]);
     assert_eq!(calls3.get(), 2);
@@ -611,43 +672,43 @@ fn test_no_recursive_length_prediction() {
 fn test_compact_int_width() {
     // The union tag is a "compact integer": wire-identical to a length prefix,
     // because C# encodes both through the same `NumberModule.Encode`.
-    let mut e = Encoder::new();
-    e.write_compact_int(0).unwrap();
-    e.write_compact_int(127).unwrap();
+    let mut e = Allocator::new();
+    ::binary::encode(&mut e, 0).unwrap();
+    ::binary::encode(&mut e, 127).unwrap();
     assert_eq!(e.as_bytes(), &[0x00, 0x7F]);
 
-    let mut e = Encoder::new();
-    e.write_compact_int(128).unwrap();
+    let mut e = Allocator::new();
+    ::binary::encode(&mut e, 128).unwrap();
     assert_eq!(e.as_bytes(), &[0x80, 0x00, 0x00, 0x80]);
 
     for v in [0u32, 1, 127, 128, 255, 65_535, i32::MAX as u32] {
-        let mut e = Encoder::new();
-        e.write_compact_int(v).unwrap();
+        let mut e = Allocator::new();
+        ::binary::encode(&mut e, v).unwrap();
         let bytes = e.finish().unwrap();
         assert_eq!(bytes.len(), binary::prefix_header_len(v as usize));
-        let mut d = Decoder::new(&bytes);
-        assert_eq!(d.read_compact_int().unwrap(), v);
-        assert_eq!(d.remaining(), 0);
+        let mut buf: &[u8] = &bytes;
+        assert_eq!(::binary::decode(&mut buf).unwrap(), v);
+        assert_eq!(buf.len(), 0);
     }
 }
 
 #[test]
 fn test_compact_int_truncated() {
-    let mut d = Decoder::new(&[0x80, 0x00, 0x00]);
-    assert_eq!(d.read_compact_int(), Err(Error::NotEnoughBytes));
+    let mut buf: &[u8] = &[0x80, 0x00, 0x00];
+    assert_eq!(::binary::decode(&mut buf), Err(Error::NotEnoughBytes));
 }
 
 // ---- `Layout::LEN` ----
 
 fn auto_bytes<T: Encode>(v: &T) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode_auto(&mut e).unwrap();
     e.finish().unwrap()
 }
 
 fn from_auto<T: for<'de> Decode<'de>>(bytes: &[u8]) -> T {
-    let mut d = Decoder::new(bytes);
-    T::decode_auto(&mut d).unwrap()
+    let mut buf: &[u8] = bytes;
+    T::decode_auto(&mut buf).unwrap()
 }
 
 /// `LEN` is a plain `usize` in which `0` means variable-length — the same
@@ -710,7 +771,7 @@ fn test_oneshot_helpers_round_trip() {
     // with `encode_auto`, which prefixes variable-length values.
     let v = (1024i32, String::from("csharp"), vec![7i32, 11]);
     let bytes = binary::to_vec(&v).unwrap();
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode(&mut e).unwrap();
     assert_eq!(bytes, e.finish().unwrap());
 
@@ -742,17 +803,12 @@ fn test_oneshot_helpers_round_trip() {
 
 #[test]
 fn test_debug_prints_state_and_bytes() {
-    let mut e = Encoder::new();
-    e.write(&[0xde, 0xad]).unwrap();
+    let mut e = Allocator::new();
+    e.append(&[0xde, 0xad]).unwrap();
     let text = format!("{e:?}");
     assert!(text.contains("backend: \"owned\""), "{text}");
     assert!(text.contains("len: 2"), "{text}");
     assert!(text.contains("dead"), "{text}");
-
-    let d = Decoder::new(&[0x01, 0x02, 0x03]);
-    let text = format!("{d:?}");
-    assert!(text.contains("remaining: 3"), "{text}");
-    assert!(text.contains("010203"), "{text}");
 }
 
 /// Four bytes on the wire, no bulk override — i.e. exactly what a type from
@@ -766,14 +822,14 @@ impl Layout for ScopedI32 {
 }
 
 impl Encode for ScopedI32 {
-    fn encode(&self, e: &mut Encoder<'_>) -> binary::Result<()> {
-        e.write(&self.0.to_le_bytes())
+    fn encode(&self, e: &mut Allocator<'_>) -> binary::Result<()> {
+        e.append(&self.0.to_le_bytes())
     }
 }
 
 impl<'de> Decode<'de> for ScopedI32 {
-    fn decode(d: &mut Decoder<'de>) -> binary::Result<Self> {
-        Ok(ScopedI32(i32::decode(d)?))
+    fn decode(payload: &'de [u8]) -> binary::Result<Self> {
+        Ok(ScopedI32(i32::decode(payload)?))
     }
 }
 
@@ -806,8 +862,8 @@ fn test_bool_and_char_validate_on_the_way_in() {
 
     // `char` validates its scalar range on the way in; a memcpy would not.
     let bad = with_header(&[0xff, 0xff, 0xff, 0xff]);
-    let mut d = Decoder::new(&bad);
-    assert!(<Vec<char>>::decode_auto(&mut d).is_err());
+    let mut buf: &[u8] = &bad;
+    assert!(<Vec<char>>::decode_auto(&mut buf).is_err());
 }
 
 #[test]
@@ -851,7 +907,7 @@ fn test_owned_encoder_commits_ahead_without_changing_output() {
     let value = (1i32, "csharp".to_string(), vec![1i32, 2, 3]);
     let expected = auto_bytes(&value);
 
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     value.encode_auto(&mut e).expect("infallible");
     assert_eq!(e.len(), expected.len());
     assert_eq!(e.as_bytes(), &expected[..]);
@@ -859,16 +915,16 @@ fn test_owned_encoder_commits_ahead_without_changing_output() {
 
     // Past the watermark the backend falls back to exact growth.
     let long = "x".repeat(300);
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     long.encode_auto(&mut e).expect("infallible");
     assert_eq!(e.as_bytes(), auto_bytes(&long).as_slice());
 
     // A capacity below the watermark commits only what was asked for, and
     // growing past it stays the plain `Vec` behavior (an owned encoder never
     // reports `BufferFull`).
-    let mut e = Encoder::with_capacity(3);
-    e.write(&[1, 2, 3]).expect("fits");
-    e.write(&[4]).expect("grows");
+    let mut e = Allocator::with_capacity(3);
+    e.append(&[1, 2, 3]).expect("fits");
+    e.append(&[4]).expect("grows");
     assert_eq!(e.as_bytes(), [1, 2, 3, 4]);
     assert_eq!(e.finish().expect("owned"), [1, 2, 3, 4]);
 }
@@ -884,24 +940,24 @@ fn test_bulk_write_backend_parity() {
     for len in [255usize, 256, 257, 4096] {
         let payload: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
 
-        let mut e = Encoder::new();
+        let mut e = Allocator::new();
         payload.encode_auto(&mut e).expect("infallible");
         let owned = e.finish().expect("owned");
 
         let mut buf = vec![0u8; owned.len()];
-        let mut e = Encoder::on_slice(&mut buf);
+        let mut e = Allocator::on_slice(&mut buf);
         payload.encode_auto(&mut e).expect("fits");
         assert_eq!(e.as_bytes(), &owned[..], "len {len}: backend parity");
 
-        let mut e = Encoder::new();
-        e.write(&[0xAA; 3]).expect("fits");
+        let mut e = Allocator::new();
+        e.append(&[0xAA; 3]).expect("fits");
         payload.encode_auto(&mut e).expect("infallible");
         let bytes = e.finish().expect("owned");
         assert_eq!(&bytes[..3], &[0xAA; 3], "len {len}: prefix kept");
         assert_eq!(&bytes[3..], &owned[..], "len {len}: offset parity");
 
-        let mut d = Decoder::new(&owned);
-        let round: Vec<u8> = Decode::decode_auto(&mut d).expect("prefix + payload");
+        let mut buf: &[u8] = &owned;
+        let round: Vec<u8> = Decode::decode_auto(&mut buf).expect("prefix + payload");
         assert_eq!(round, payload, "len {len}: round trip");
     }
 }
@@ -947,7 +1003,7 @@ fn test_byte_slice_raw_form_has_no_header() {
     // `&[u8]` mirrors `[u8]`: the raw form is the bytes alone. The length prefix
     // belongs to the auto and named forms.
     let bytes: &[u8] = b"abc";
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     <&[u8] as Encode>::encode(&bytes, &mut e).unwrap();
     assert_eq!(e.finish().unwrap(), b"abc".to_vec());
 }
@@ -955,7 +1011,7 @@ fn test_byte_slice_raw_form_has_no_header() {
 #[test]
 fn test_array_of_variable_size_elements() {
     // `[T; N]` with `T::LEN == 0` has no size estimate, so the header goes
-    // through the compacting `write_prefixed` path; the payload is still every
+    // through the compacting `append_with_length_prefix` path; the payload is still every
     // element through `auto`, with no element count of its own.
     let arr = [String::from("one"), String::from("two")];
     assert_eq!(<[String; 2] as Layout>::LEN, 0);
@@ -976,18 +1032,18 @@ fn test_array_decode_drops_the_initialised_prefix_on_error() {
 
     // A prefix that promises more than is there is caught by the bounded scope
     // before the array is touched.
-    let mut d = Decoder::new(&bytes[..bytes.len() - 1]);
+    let mut buf: &[u8] = &bytes[..bytes.len() - 1];
     assert_eq!(
-        <[String; 2] as Decode>::decode_auto(&mut d).unwrap_err(),
-        Error::PayloadTruncated
+        <[String; 2] as Decode>::decode_auto(&mut buf).unwrap_err(),
+        Error::NotEnoughBytes
     );
 
     // In the raw form the failure lands on the second element, after the first
     // `String` was built: that one has to be dropped, not leaked.
-    let mut d = Decoder::new(&bytes[1..bytes.len() - 1]);
+    let buf: &[u8] = &bytes[1..bytes.len() - 1];
     assert_eq!(
-        <[String; 2] as Decode>::decode(&mut d).unwrap_err(),
-        Error::PayloadTruncated
+        <[String; 2] as Decode>::decode(buf).unwrap_err(),
+        Error::NotEnoughBytes
     );
 }
 
@@ -995,34 +1051,34 @@ fn test_array_decode_drops_the_initialised_prefix_on_error() {
 fn test_option_rejects_an_unknown_tag() {
     // Only `00` / `01` are tags: anything else is a wire error, not a truthy
     // value, and both forms say so.
-    let mut d = Decoder::new(&[0x02]);
+    let buf: &[u8] = &[0x02];
     assert_eq!(
-        Option::<i32>::decode(&mut d).unwrap_err(),
-        Error::InvalidTag(2)
+        Option::<i32>::decode(buf).unwrap_err().to_string(),
+        "invalid option tag: 2"
     );
 
-    let mut d = Decoder::new(&[0xff]);
+    let mut buf: &[u8] = &[0xff];
     assert_eq!(
-        Option::<i32>::decode_auto(&mut d).unwrap_err(),
-        Error::InvalidTag(0xff)
+        Option::<i32>::decode_auto(&mut buf)
+            .unwrap_err()
+            .to_string(),
+        "invalid option tag: 255"
     );
 }
 
 #[test]
-fn test_decoder_cursor_at_the_end() {
-    // `take_byte` / `peek_byte` both refuse to read past the end, and a peek
-    // never consumes: the following take still sees the same byte.
-    let mut d = Decoder::new(&[]);
-    assert_eq!(d.take_byte().unwrap_err(), Error::NotEnoughBytes);
-    assert_eq!(d.peek_byte().unwrap_err(), Error::NotEnoughBytes);
+fn test_cursor_at_the_end() {
+    // Reading past the end is `NotEnoughBytes`; slicing a peek off the front
+    // never consumes anything.
+    let buf: &[u8] = &[];
+    assert_eq!(<u8 as Decode>::decode(buf), Err(Error::NotEnoughBytes));
+    assert_eq!(buf.first().copied(), None);
 
-    let mut d = Decoder::new(&[0x2a]);
-    assert_eq!(d.peek_byte().unwrap(), 0x2a);
-    assert_eq!(d.peek_byte().unwrap(), 0x2a, "peek must not consume");
-    assert_eq!(d.remaining(), 1, "peek must not consume");
-    assert_eq!(d.take_byte().unwrap(), 0x2a);
-    assert_eq!(d.remaining(), 0);
-    assert_eq!(d.peek_byte().unwrap_err(), Error::NotEnoughBytes);
+    let mut buf: &[u8] = &[0x2a];
+    assert_eq!(buf.first().copied(), Some(0x2a), "peek does not consume");
+    assert_eq!(<u8 as Decode>::decode_auto(&mut buf).unwrap(), 0x2a);
+    assert_eq!(buf.len(), 0);
+    assert_eq!(<u8 as Decode>::decode(buf), Err(Error::NotEnoughBytes));
 }
 
 #[test]
@@ -1031,8 +1087,8 @@ fn test_borrowed_encoder_has_no_finish() {
     // one there is nothing to return. The debug form names the backend, so the
     // two are distinguishable in a failure message.
     let mut buf = [0u8; 2];
-    let mut e = Encoder::on_slice(&mut buf);
-    e.write(&[7, 8]).unwrap();
+    let mut e = Allocator::on_slice(&mut buf);
+    e.append(&[7, 8]).unwrap();
 
     let text = format!("{e:?}");
     assert!(text.contains("backend: \"borrowed\""), "{text}");
@@ -1040,27 +1096,27 @@ fn test_borrowed_encoder_has_no_finish() {
 
     assert_eq!(
         e.finish().unwrap_err(),
-        Error::message_static("cannot finish a borrowed encoder")
+        Error::message_static("cannot finish a borrowed allocator")
     );
 }
 
 #[test]
 fn test_bulk_write_past_the_committed_prefix() {
-    // `Encoder::new` commits the first 128 bytes ahead of `pos`, so the bulk arm
+    // `Allocator::new` commits the first 128 bytes ahead of `pos`, so the bulk arm
     // normally overwrites part of that region. Once `pos` has caught up there is
     // nothing to overwrite and the payload is appended instead; both shapes must
     // produce the same bytes.
     let payload = vec![0xAB; 300];
 
-    let mut e = Encoder::new();
-    e.write(&[0x11; 128]).unwrap();
-    e.write(&payload).unwrap();
+    let mut e = Allocator::new();
+    e.append(&[0x11; 128]).unwrap();
+    e.append(&payload).unwrap();
     let appended = e.finish().unwrap();
 
-    let mut e = Encoder::new();
-    e.write(&[0x11; 128]).unwrap();
+    let mut e = Allocator::new();
+    e.append(&[0x11; 128]).unwrap();
     for byte in &payload {
-        e.write(&[*byte]).unwrap();
+        e.append(&[*byte]).unwrap();
     }
     let per_byte = e.finish().unwrap();
 

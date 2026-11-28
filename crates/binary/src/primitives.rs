@@ -1,7 +1,6 @@
+use crate::allocator::Allocator;
 use crate::codec::{Decode, Encode, Layout};
-use crate::decoder::Decoder;
-use crate::encoder::Encoder;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 use alloc::vec::Vec;
 use core::mem;
@@ -17,8 +16,8 @@ macro_rules! impl_fixed {
 
             impl Encode for $ty {
                 #[inline]
-                fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-                    e.write(&self.to_le_bytes())
+                fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+                    e.append(&self.to_le_bytes())
                 }
 
                 // The only bulk arms in the crate, kept here so that no
@@ -27,7 +26,7 @@ macro_rules! impl_fixed {
                 // pattern; a wider one is byte-identical to the wire only on a
                 // little-endian target, so the arm compiles away elsewhere.
                 #[inline]
-                fn encode_slice(items: &[Self], e: &mut Encoder<'_>) -> Result<()> {
+                fn encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()> {
                     if mem::size_of::<Self>() == 1 || cfg!(target_endian = "little") {
                         // SAFETY: fixed-width scalar — `LEN == size_of`, no
                         // padding, all bit patterns valid, nothing owned, and
@@ -45,22 +44,26 @@ macro_rules! impl_fixed {
 
             impl<'de> Decode<'de> for $ty {
                 #[inline]
-                fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-                    let bytes = d.take(mem::size_of::<$ty>())?;
-                    Ok(<$ty>::from_le_bytes(bytes.try_into().unwrap()))
+                fn decode(payload: &'de [u8]) -> Result<Self> {
+                    // The framework slices exactly LEN bytes; a short payload
+                    // only reaches here through a hand-rolled call.
+                    let bytes = <$ty>::from_le_bytes(
+                        payload.try_into().map_err(|_| Error::NotEnoughBytes)?,
+                    );
+                    Ok(bytes)
                 }
 
                 #[inline]
-                fn decode_slice(d: &mut Decoder<'de>, count: usize) -> Result<Vec<Self>> {
+                fn decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>> {
                     if mem::size_of::<Self>() == 1 || cfg!(target_endian = "little") {
                         // SAFETY: as in `encode_slice` above; every bit pattern
                         // of a fixed-width scalar is a valid value, and the
                         // type owns nothing.
-                        unsafe { crate::pod::read_bulk(d, count) }
+                        unsafe { crate::pod::read_bulk(payload, count) }
                     } else {
                         let mut values = Vec::with_capacity(count);
-                        for _ in 0..count {
-                            values.push(Self::decode(d)?);
+                        for p in payload.chunks_exact(mem::size_of::<Self>()) {
+                            values.push(Self::decode(p)?);
                         }
                         Ok(values)
                     }
@@ -80,12 +83,12 @@ impl Layout for usize {
 
 impl Encode for usize {
     #[inline]
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write(&self.to_le_bytes())
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append(&self.to_le_bytes())
     }
 
     #[inline]
-    fn encode_slice(items: &[Self], e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()> {
         // Never 1 byte, so the bulk arm only exists on a little-endian target.
         if cfg!(target_endian = "little") {
             // SAFETY: `LEN == size_of`, no padding, every bit pattern valid,
@@ -102,20 +105,20 @@ impl Encode for usize {
 
 impl<'de> Decode<'de> for usize {
     #[inline]
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        let bytes = d.take(mem::size_of::<usize>())?;
-        Ok(usize::from_le_bytes(bytes.try_into().unwrap()))
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        let bytes = usize::from_le_bytes(payload.try_into().map_err(|_| Error::NotEnoughBytes)?);
+        Ok(bytes)
     }
 
     #[inline]
-    fn decode_slice(d: &mut Decoder<'de>, count: usize) -> Result<Vec<Self>> {
+    fn decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>> {
         if cfg!(target_endian = "little") {
             // SAFETY: as in `encode_slice` above.
-            unsafe { crate::pod::read_bulk(d, count) }
+            unsafe { crate::pod::read_bulk(payload, count) }
         } else {
             let mut values = Vec::with_capacity(count);
-            for _ in 0..count {
-                values.push(Self::decode(d)?);
+            for p in payload.chunks_exact(mem::size_of::<Self>()) {
+                values.push(Self::decode(p)?);
             }
             Ok(values)
         }
@@ -128,12 +131,12 @@ impl Layout for isize {
 
 impl Encode for isize {
     #[inline]
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write(&self.to_le_bytes())
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append(&self.to_le_bytes())
     }
 
     #[inline]
-    fn encode_slice(items: &[Self], e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_slice(items: &[Self], e: &mut Allocator<'_>) -> Result<()> {
         // Never 1 byte, so the bulk arm only exists on a little-endian target.
         if cfg!(target_endian = "little") {
             // SAFETY: `LEN == size_of`, no padding, every bit pattern valid,
@@ -150,20 +153,20 @@ impl Encode for isize {
 
 impl<'de> Decode<'de> for isize {
     #[inline]
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        let bytes = d.take(mem::size_of::<isize>())?;
-        Ok(isize::from_le_bytes(bytes.try_into().unwrap()))
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        let bytes = isize::from_le_bytes(payload.try_into().map_err(|_| Error::NotEnoughBytes)?);
+        Ok(bytes)
     }
 
     #[inline]
-    fn decode_slice(d: &mut Decoder<'de>, count: usize) -> Result<Vec<Self>> {
+    fn decode_slice(payload: &'de [u8], count: usize) -> Result<Vec<Self>> {
         if cfg!(target_endian = "little") {
             // SAFETY: as in `encode_slice` above.
-            unsafe { crate::pod::read_bulk(d, count) }
+            unsafe { crate::pod::read_bulk(payload, count) }
         } else {
             let mut values = Vec::with_capacity(count);
-            for _ in 0..count {
-                values.push(Self::decode(d)?);
+            for p in payload.chunks_exact(mem::size_of::<Self>()) {
+                values.push(Self::decode(p)?);
             }
             Ok(values)
         }
@@ -187,15 +190,15 @@ impl Layout for bool {
 
 impl Encode for bool {
     #[inline]
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write_byte(if *self { 1 } else { 0 })
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append_byte(if *self { 1 } else { 0 })
     }
 }
 
 impl<'de> Decode<'de> for bool {
     #[inline]
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        let b = d.take_byte()?;
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        let &b = payload.first().ok_or(Error::NotEnoughBytes)?;
         Ok(b != 0)
     }
 }
@@ -211,16 +214,15 @@ impl Layout for char {
 
 impl Encode for char {
     #[inline]
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write(&(*self as u32).to_le_bytes())
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append(&(*self as u32).to_le_bytes())
     }
 }
 
 impl<'de> Decode<'de> for char {
     #[inline]
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        let bytes = d.take(4)?;
-        let v = u32::from_le_bytes(bytes.try_into().unwrap());
-        char::from_u32(v).ok_or(crate::error::Error::message_static("invalid char value"))
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        let bytes = u32::from_le_bytes(payload.try_into().map_err(|_| Error::NotEnoughBytes)?);
+        char::from_u32(bytes).ok_or(Error::message_static("invalid char value"))
     }
 }

@@ -4,12 +4,12 @@
 //! cannot travel *through* them as-is — it is degraded at the boundary. These
 //! tests pin the two degradations and their costs: `message` (message only, no
 //! allocation when static) and `wrapped` (type retained behind an `Arc`, textual
-//! equality). Plus the `?` bridge and the position folding that comes with it.
+//! equality). Plus the `?` bridge and where the cursor stands after a failure.
 //!
 //! The last section pins the *names* themselves: each variant has to describe
-//! the failure it actually reports (DESIGN §18.9).
+//! the failure it actually reports (DESIGN §18.4).
 
-use binary::{Decode, Decoder, Encode, Encoder, ErasedError, Error, Layout, Result};
+use binary::{Allocator, Decode, Encode, Error, Layout, Result};
 use std::borrow::Cow;
 
 /// A domain error owned by the (simulated) downstream crate.
@@ -102,24 +102,24 @@ fn test_from_impl_makes_question_mark_work() {
     impl Layout for Dense {}
 
     impl Encode for Dense {
-        fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+        fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
             check_count(self.count)?;
-            e.write_byte(self.count)?;
+            e.append_byte(self.count)?;
             self.payload.encode_auto(e)
         }
     }
 
     impl<'de> Decode<'de> for Dense {
-        fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-            let count = d.take_byte()?;
+        fn decode(payload: &'de [u8]) -> Result<Self> {
+            let (&count, mut rest) = payload.split_first().ok_or(Error::NotEnoughBytes)?;
             check_count(count)?;
-            let payload = <Vec<u8> as Decode>::decode_auto(d)?;
+            let payload = <Vec<u8> as Decode>::decode_auto(&mut rest)?;
             Ok(Self { count, payload })
         }
     }
 
     fn encode_raw<T: Encode>(v: &T) -> Result<Vec<u8>> {
-        let mut e = Encoder::new();
+        let mut e = Allocator::new();
         v.encode(&mut e)?;
         e.finish()
     }
@@ -134,8 +134,8 @@ fn test_from_impl_makes_question_mark_work() {
     assert!(matches!(err, Error::Message(_)));
 
     // Decode side: same message, same variant.
-    let mut d = Decoder::new(&[200]);
-    let err = <Dense as Decode>::decode(&mut d).unwrap_err();
+    let buf: &[u8] = &[200];
+    let err = <Dense as Decode>::decode(buf).unwrap_err();
     assert_eq!(err.to_string(), "count 200 out of range");
 
     // And the happy path still round-trips.
@@ -145,10 +145,7 @@ fn test_from_impl_makes_question_mark_work() {
     };
     let bytes = encode_raw(&ok).unwrap();
     assert_eq!(bytes, [0x03, 0x03, 1, 2, 3]);
-    assert_eq!(
-        <Dense as Decode>::decode(&mut Decoder::new(&bytes)).unwrap(),
-        ok
-    );
+    assert_eq!(<Dense as Decode>::decode(&bytes).unwrap(), ok);
 }
 
 #[test]
@@ -202,55 +199,39 @@ fn test_degraded_error_cannot_be_recovered() {
 }
 
 #[test]
-fn test_failure_offset_folds_through_nested_prefixes() {
-    // outer scope: 2-byte payload; inner scope: 1-byte payload holding 0xAA.
-    let bytes = [0x02, 0x01, 0xAA];
-    let mut d = Decoder::new(&bytes);
-
-    let err = d
-        .with_prefix(|d| {
-            d.with_prefix(|d| {
-                d.take(1)?; // consumes 0xAA, inner cursor = 1
-                d.take(1).map(|_| ()) // fails; `take` leaves the cursor alone
-            })
-        })
-        .unwrap_err();
-
-    assert_eq!(err, Error::NotEnoughBytes);
-    // The absolute offset is the caller's arithmetic — `total - remaining`, the
-    // same expression C#/C++ use because there the span *is* the cursor.
-    // Consumed: 1 (outer prefix) + 1 (inner prefix) + 1 (0xAA) = 3, i.e. the end
-    // of the buffer. Without the fold inside `with_prefix` this would report 0.
-    assert_eq!(bytes.len() - d.remaining(), 3);
+fn test_failed_auto_decode_leaves_the_cursor_alone() {
+    // `take` and `decode_with_length_prefix` advance only on success: a short
+    // header or a payload shorter than declared leaves the cursor untouched.
+    // A header declaring 2 bytes with only 1 present.
+    let bytes = [0x02, 0x01];
+    let mut buf: &[u8] = &bytes;
+    assert_eq!(
+        <Vec<u8> as Decode>::decode_auto(&mut buf),
+        Err(Error::NotEnoughBytes)
+    );
+    assert_eq!(buf.len(), bytes.len(), "nothing was consumed");
 }
 
 #[test]
 fn test_offset_reported_from_inside_a_custom_impl() {
-    // A custom impl only ever sees a *scoped* decoder, so the honest thing it
-    // can report is how far into the value it stopped; turning that into an
-    // absolute byte is the caller's job, since only it holds the buffer.
+    // A custom impl sees only the payload slice, so the honest thing it can
+    // report is how far into the value it stopped; the absolute offset is the
+    // caller's arithmetic, since only it holds the whole buffer.
     #[derive(Debug)]
     struct Probe;
     impl Layout for Probe {}
     impl<'de> Decode<'de> for Probe {
-        fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-            let start = d.remaining();
-            let _ = d.take(1)?;
+        fn decode(payload: &'de [u8]) -> Result<Self> {
+            let (&_b, rest) = payload.split_first().ok_or(Error::NotEnoughBytes)?;
             Err(Error::message(format_args!(
                 "stopped {} byte(s) into the value",
-                start - d.remaining()
+                payload.len() - rest.len()
             )))
         }
     }
 
-    let mut d = Decoder::new(&[0xAA, 0xBB]);
-    let err = <Probe as Decode>::decode(&mut d).unwrap_err();
+    let err = <Probe as Decode>::decode(&[0xAA, 0xBB]).unwrap_err();
     assert_eq!(err.to_string(), "stopped 1 byte(s) into the value");
-    assert_eq!(
-        2 - d.remaining(),
-        1,
-        "absolute offset is one subtraction away"
-    );
 }
 
 // --- Error::wrapped: the type-erased channel ---------------------------------
@@ -311,9 +292,9 @@ fn test_wrapped_equality_is_textual() {
     let real = Error::wrapped(BadFrame(7));
     let fake = Error::wrapped(Impostor);
 
-    // Accepted consequence, documented on `ErasedError`: erasure leaves no type id
-    // to compare, so equality falls back to `Display`. Two unrelated types that
-    // print the same text compare equal.
+    // Accepted consequence, documented on the `PartialEq` impl: erasure leaves
+    // no type id to compare, so equality falls back to `Display`. Two
+    // unrelated types that print the same text compare equal.
     assert_eq!(real, fake);
     assert_eq!(real.clone(), fake.clone());
 
@@ -340,13 +321,13 @@ fn test_wrapped_error_crosses_the_trait_boundary() {
     impl Layout for Frame {}
 
     impl Encode for Frame {
-        fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+        fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
             check_frame(self.0.len())?; // BadFrame -> Error::Wrapped
             self.0.encode_auto(e)
         }
     }
 
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     let err = Frame(vec![1, 2]).encode(&mut e).unwrap_err();
 
     assert!(matches!(err, Error::Wrapped(_)));
@@ -358,37 +339,38 @@ fn test_wrapped_error_crosses_the_trait_boundary() {
     assert!(matches!(src.downcast_ref::<BadFrame>(), Some(BadFrame(2))));
 
     // And the happy path is untouched: 4 bytes go through the length prefix.
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     Frame(vec![1, 2, 3, 4]).encode(&mut e).unwrap();
     assert_eq!(e.finish().unwrap(), [0x04, 1, 2, 3, 4]);
 }
 
 // --- variant semantics -------------------------------------------------------
 //
-// One test per rename that was about *meaning*, not spelling. Each one fails
-// under the old name, which is why the old name was wrong (DESIGN §18.9).
+// One test per fold that was about *meaning*, not spelling: what the surviving
+// five variants are responsible for, and what each folded error now reports.
 
 #[test]
-fn test_truncated_payload_is_not_a_short_read() {
+fn test_truncated_payload_is_a_short_read() {
     // (a) The header itself is cut: not even a 4-byte prefix can be completed.
     let buf = [0x80u8, 0x00];
-    let mut d = Decoder::new(&buf);
+    let mut buf: &[u8] = &buf;
     assert_eq!(
-        d.with_prefix(|_| Ok(())).unwrap_err(),
-        Error::NotEnoughBytes
+        binary::decode_with_length_prefix(&mut buf),
+        Err(Error::NotEnoughBytes)
     );
 
     // (b) The header is complete and declares 4 bytes; only 1 is present.
     let buf = [0x04u8, 0xAA];
-    let mut d = Decoder::new(&buf);
+    let mut buf: &[u8] = &buf;
     assert_eq!(
-        d.with_prefix(|_| Ok(())).unwrap_err(),
-        Error::PayloadTruncated
+        binary::decode_with_length_prefix(&mut buf),
+        Err(Error::NotEnoughBytes)
     );
 
-    // Two different failures at the same wire position — the reason the old
-    // `LengthPrefixMismatch` had to be split. A caller that retries on a short
-    // read should not retry on a truncated payload.
+    // Both shapes report the same variant now. The old `PayloadTruncated` split
+    // existed for streaming retry semantics this wire format does not promise;
+    // a caller that cannot act on the distinction has no use for two variants
+    // of the same short read.
 }
 
 #[test]
@@ -397,17 +379,17 @@ fn test_misaligned_fixed_size_elements() {
     // `auto` already consumed the outer prefix. 6 bytes is not a whole number of
     // 4-byte elements, so there is no honest count to decode.
     let buf = [1u8, 0, 0, 0, 2, 0];
-    let mut d = Decoder::new(&buf);
+    let buf: &[u8] = &buf;
     assert_eq!(
-        Vec::<i32>::decode(&mut d).unwrap_err(),
-        Error::MisalignedElements
+        Vec::<i32>::decode(buf).unwrap_err().to_string(),
+        "misaligned element payload"
     );
 
     // 8 bytes is, and the same code path decodes it: the error is about the
     // payload shape, not about `Vec` being unsupported.
     let buf = [1u8, 0, 0, 0, 2, 0, 0, 0];
-    let mut d = Decoder::new(&buf);
-    assert_eq!(Vec::<i32>::decode(&mut d).unwrap(), vec![1, 2]);
+    let buf: &[u8] = &buf;
+    assert_eq!(Vec::<i32>::decode(buf).unwrap(), vec![1, 2]);
 }
 
 #[test]
@@ -415,9 +397,9 @@ fn test_length_beyond_i32_max_is_reported_before_writing() {
     // The wire stores a length in a signed 31-bit field. Asking for one more
     // byte must fail *before* the reservation, otherwise the release build would
     // OR the length into 4 bytes with the marker bit, truncating it silently.
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     let err = e
-        .write_prefixed_bounded(i32::MAX as usize + 1, |_| Ok(()))
+        .append_with_length_prefix_bounded(i32::MAX as usize + 1, |_| Ok(()))
         .unwrap_err();
     assert_eq!(err, Error::LengthTooLarge);
     assert_eq!(e.len(), 0, "the guard runs before anything is written");
@@ -429,32 +411,38 @@ fn test_compact_int_beyond_i32_max_is_rejected() {
     // keeps bit 31 as *data* while the decoder masks that bit away, so
     // `0x8000_0001` would read back as `1`. A release build used to reach only a
     // `debug_assert!` here, i.e. it wrote a silently wrong tag.
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     assert_eq!(
-        e.write_compact_int(i32::MAX as u32 + 1).unwrap_err(),
+        ::binary::encode(&mut e, i32::MAX as u32 + 1).unwrap_err(),
         Error::LengthTooLarge
     );
     assert_eq!(e.len(), 0, "the guard runs before anything is written");
 
     // The largest legal tag still round-trips, and it is the all-ones wide form.
-    e.write_compact_int(i32::MAX as u32).unwrap();
+    ::binary::encode(&mut e, i32::MAX as u32).unwrap();
     let bytes = e.finish().unwrap();
     assert_eq!(bytes, [0xFF, 0xFF, 0xFF, 0xFF]);
-    let mut d = Decoder::new(&bytes);
-    assert_eq!(d.read_compact_int().unwrap(), i32::MAX as u32);
+    let mut buf: &[u8] = &bytes;
+    assert_eq!(::binary::decode(&mut buf).unwrap(), i32::MAX as u32);
 }
 
 #[test]
-fn test_take_past_the_end_is_not_enough_bytes() {
-    let mut d = Decoder::new(&[1, 2, 3]);
-    // `n` is attacker-sized: `pos + n` used to overflow, which panicked on the
-    // slice expression (release) or on the addition (debug) instead of failing.
-    assert_eq!(d.take(usize::MAX), Err(Error::NotEnoughBytes));
-    assert_eq!(d.remaining(), 3, "a failed take leaves the cursor alone");
-
-    assert_eq!(d.take(4), Err(Error::NotEnoughBytes));
-    assert_eq!(d.take(3).unwrap(), &[1, 2, 3]);
-    assert_eq!(d.take(1), Err(Error::NotEnoughBytes));
+fn test_short_value_is_not_enough_bytes() {
+    // The old `take` overflow pin, restated on the public surface: a request
+    // larger than the buffer compares, never adds, so the slice arithmetic
+    // cannot panic — it just reports the short read.
+    assert_eq!(
+        binary::from_slice::<u128>(&[1, 2, 3]),
+        Err(Error::NotEnoughBytes)
+    );
+    assert_eq!(
+        binary::from_slice::<u32>(&[1, 2, 3]),
+        Err(Error::NotEnoughBytes)
+    );
+    assert_eq!(
+        binary::from_slice::<[u8; 3]>(&[1, 2, 3]).unwrap(),
+        [1, 2, 3]
+    );
 }
 
 #[test]
@@ -465,54 +453,66 @@ fn test_unknown_name_is_skipped_but_bad_index_is_an_error() {
     let buf = [0x02u8, b'a', b'b', 0x01, 0x2A];
 
     // An unknown *name* is skipped for forward compatibility — not an error.
-    let mut d = Decoder::new(&buf);
-    let members = NamedMembers::<1>::parse(&mut d, |_| None).unwrap();
+    let members = NamedMembers::<1>::parse(&buf, |_| None).unwrap();
     assert!(members.get(0).is_none());
 
     // A `find` table that answers with an out-of-range index is an invariant
-    // violation, and that is what `InvalidMemberIndex` names. It is *not* the
-    // "unknown member" the old name claimed.
-    let mut d = Decoder::new(&buf);
-    let err = NamedMembers::<1>::parse(&mut d, |_| Some(1)).err().unwrap();
-    assert_eq!(err, Error::InvalidMemberIndex);
+    // violation of the generated code — not the "unknown member" an old name
+    // once claimed, and not a variant of its own: it is a fixed-text error.
+    let err = NamedMembers::<1>::parse(&buf, |_| Some(1)).err().unwrap();
+    assert_eq!(err.to_string(), "invalid member index");
 }
 
 #[test]
 fn test_display_text_matches_the_variant_name() {
-    // Naming rule 6: the name and its message are translations of each other,
-    // so a reader holding one can find the other. These are the pairs that were
-    // out of sync before the rename (`Overflow` printed "buffer overflow",
-    // `LengthPrefixMismatch` printed "does not match", `UnknownMember` printed
-    // "unknown member" — three names, three lies).
+    // The three unit variants are the whole type-independent surface; their
+    // names and their messages are translations of each other, so a reader
+    // holding one can find the other.
     let cases = [
         (Error::BufferFull, "buffer full"),
         (Error::NotEnoughBytes, "not enough bytes"),
         (Error::LengthTooLarge, "length prefix exceeds i32::MAX"),
-        (Error::DuplicateMember, "duplicate named member"),
-        (Error::InvalidMemberIndex, "invalid member index"),
-        (Error::PayloadTruncated, "payload truncated"),
-        (Error::MisalignedElements, "misaligned element payload"),
     ];
     for (err, text) in cases {
         assert_eq!(err.to_string(), text);
     }
 
-    // The two payload-carrying unit-like variants append their payload.
-    assert_eq!(Error::InvalidTag(9).to_string(), "invalid tag: 9");
+    // Everything specific travels as fixed static text or a formatted message.
     assert_eq!(
-        Error::MissingMember("id").to_string(),
+        Error::message_static("misaligned element payload").to_string(),
+        "misaligned element payload"
+    );
+    assert_eq!(
+        Error::message_static("duplicate named member").to_string(),
+        "duplicate named member"
+    );
+    assert_eq!(
+        Error::message_static("invalid member index").to_string(),
+        "invalid member index"
+    );
+    assert_eq!(
+        Error::message(format_args!("invalid option tag: {}", 9)).to_string(),
+        "invalid option tag: 9"
+    );
+    assert_eq!(
+        Error::message(format_args!("missing required member: {}", "id")).to_string(),
         "missing required member: id"
     );
 }
 
 #[test]
-fn test_source_chain_reaches_the_payload_from_the_erasure() {
-    // `ErasedError` is public and implements `Error` itself, so a caller holding
-    // the erasure rather than the `Error` wrapper still walks into the payload.
-    let erased = ErasedError::new(BadFrame(3));
-    let src = std::error::Error::source(&erased).expect("the erasure exposes its payload");
-    assert_eq!(src.to_string(), "bad frame 3");
-    assert!(src.downcast_ref::<BadFrame>().is_some());
+fn test_wrapped_variant_hands_out_the_erased_payload() {
+    // Matching the variant gives the caller the `Arc` itself: cloneable and
+    // downcastable without going through `source()`.
+    let err = Error::wrapped(BadFrame(3));
+    let Error::Wrapped(arc) = err else {
+        panic!("expected Wrapped, got {err}");
+    };
+    assert_eq!(arc.to_string(), "bad frame 3");
+    assert!(arc.downcast_ref::<BadFrame>().is_some());
+
+    let cloned = arc.clone();
+    assert!(cloned.downcast_ref::<BadFrame>().is_some());
 
     // Variants that carry no foreign error report no source at all.
     assert!(std::error::Error::source(&Error::BufferFull).is_none());

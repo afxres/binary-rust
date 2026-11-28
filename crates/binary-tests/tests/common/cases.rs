@@ -11,7 +11,7 @@
 //! column (`fsharp.tsv` for a union) plus an entry below; an unknown name panics
 //! rather than being skipped.
 
-use binary::{Decode, Decoder, Encode, Encoder};
+use binary::{Allocator, Decode, Encode};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
@@ -81,7 +81,7 @@ enum Measure {
 }
 
 fn encode_auto<T: Encode>(v: &T) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode_auto(&mut e).unwrap();
     e.finish().unwrap()
 }
@@ -92,7 +92,7 @@ macro_rules! cases {
     ($($name:literal => $ty:ty { $value:expr }),* $(,)?) => {
         /// Encode the case into an encoder the caller owns, so a test can pick
         /// the backend and the buffer's initial contents.
-        pub fn encode_case_into(name: &str, e: &mut Encoder<'_>) {
+        pub fn encode_case_into(name: &str, e: &mut Allocator<'_>) {
             match name {
                 $($name => { let v: $ty = $value; v.encode_auto(e).unwrap(); })*
                 _ => panic!("fixture case has no Rust value: {name}"),
@@ -100,7 +100,7 @@ macro_rules! cases {
         }
 
         pub fn encode_case(name: &str) -> Vec<u8> {
-            let mut e = Encoder::new();
+            let mut e = Allocator::new();
             encode_case_into(name, &mut e);
             e.finish().unwrap()
         }
@@ -110,7 +110,7 @@ macro_rules! cases {
             match name {
                 $($name => {
                     let v: $ty = $value;
-                    let mut e = Encoder::new();
+                    let mut e = Allocator::new();
                     v.encode(&mut e).unwrap();
                     e.finish().unwrap()
                 })*
@@ -127,8 +127,8 @@ macro_rules! cases {
         pub fn reencode_case(name: &str, wire: &[u8]) -> Vec<u8> {
             match name {
                 $($name => {
-                    let mut d = Decoder::new(wire);
-                    let v: $ty = Decode::decode_auto(&mut d).unwrap_or_else(|e| panic!("decode {name}: {e:?}"));
+                    let mut buf: &[u8] = wire;
+                    let v: $ty = Decode::decode_auto(&mut buf).unwrap_or_else(|e| panic!("decode {name}: {e:?}"));
                     encode_auto(&v)
                 })*
                 _ => panic!("fixture case has no Rust value: {name}"),
@@ -141,11 +141,11 @@ macro_rules! cases {
             match name {
                 $($name => {
                     let expected: $ty = $value;
-                    let mut d = Decoder::new(wire);
+                    let mut buf: &[u8] = wire;
                     let actual: $ty = if auto {
-                        Decode::decode_auto(&mut d)
+                        Decode::decode_auto(&mut buf)
                     } else {
-                        Decode::decode(&mut d)
+                        Decode::decode(buf)
                     }
                     .unwrap_or_else(|e| panic!("decode {name}: {e:?}"));
                     assert_eq!(actual, expected, "case {name}: decoded value differs from the corpus value");

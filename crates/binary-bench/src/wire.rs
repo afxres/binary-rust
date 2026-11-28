@@ -21,7 +21,7 @@
 //! Buffer handling mirrors C++: one 1024-byte buffer reused across iterations,
 //! nothing allocated for the result. C# does the same with `new Allocator(buf)`.
 
-use binary::{Decode, Decoder, Encode, Encoder};
+use binary::{Allocator, Decode, Encode};
 
 use crate::harness::{bench, bench_ret, header};
 
@@ -89,7 +89,7 @@ pub(crate) fn named_value() -> Type01 {
 /// `on_slice` is the borrowed backend: no growth, overflow returns
 /// `Error::BufferFull` (the same contract as C++ `Allocator(span)`).
 fn encode_raw_into<T: Encode>(value: &T, buf: &mut [u8]) -> usize {
-    let mut e = Encoder::on_slice(buf);
+    let mut e = Allocator::on_slice(buf);
     value.encode(&mut e).expect("1024 bytes is enough");
     e.len()
 }
@@ -97,8 +97,8 @@ fn encode_raw_into<T: Encode>(value: &T, buf: &mut [u8]) -> usize {
 /// Decode the raw form (no leading prefix), matching C# `Decode` and C++
 /// `Decode`.
 fn decode_raw_from<'a, T: Decode<'a>>(bytes: &'a [u8]) -> T {
-    let mut d = Decoder::new(bytes);
-    T::decode(&mut d).expect("round-tripped above")
+    let buf: &[u8] = bytes;
+    T::decode(buf).expect("round-tripped above")
 }
 
 pub fn run() {

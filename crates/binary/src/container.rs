@@ -1,6 +1,5 @@
+use crate::allocator::Allocator;
 use crate::codec::{Decode, Encode, Layout};
-use crate::decoder::Decoder;
-use crate::encoder::Encoder;
 use crate::error::{Error, Result};
 
 use alloc::string::String;
@@ -15,16 +14,16 @@ impl Layout for str {
 
 impl Encode for str {
     #[inline]
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write(self.as_bytes())
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append(self.as_bytes())
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         // `str` is UTF-8 by construction, so `len()` is the exact wire byte
         // count: header width is known before the payload moves, and one
         // reservation covers both.
-        e.write_prefixed_bytes(self.as_bytes())
+        e.append_prefixed_bytes(self.as_bytes())
     }
 }
 
@@ -34,22 +33,21 @@ impl Layout for String {
 
 impl Encode for String {
     #[inline]
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write(self.as_bytes())
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append(self.as_bytes())
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write_prefixed_bytes(self.as_bytes())
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append_prefixed_bytes(self.as_bytes())
     }
 }
 
 impl<'de> Decode<'de> for String {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        // `auto` has already consumed the outer prefix and constrained the
-        // decoder to the exact payload region, so read all remaining bytes.
-        let bytes = d.take(d.remaining())?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| Error::message_static("invalid UTF-8"))
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        // Raw position: the whole slice is the payload. In `auto` position the
+        // framework hands over exactly the prefix-declared bytes.
+        String::from_utf8(payload.to_vec()).map_err(|_| Error::message_static("invalid UTF-8"))
     }
 }
 
@@ -62,20 +60,19 @@ impl Layout for &str {
 
 impl Encode for &str {
     #[inline]
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write(self.as_bytes())
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append(self.as_bytes())
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write_prefixed_bytes(self.as_bytes())
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append_prefixed_bytes(self.as_bytes())
     }
 }
 
 impl<'de> Decode<'de> for &'de str {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        let bytes = d.take(d.remaining())?;
-        core::str::from_utf8(bytes).map_err(|_| Error::message_static("invalid UTF-8"))
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        core::str::from_utf8(payload).map_err(|_| Error::message_static("invalid UTF-8"))
     }
 }
 
@@ -87,13 +84,13 @@ impl Layout for [u8] {
 
 impl Encode for [u8] {
     #[inline]
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write(self)
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append(self)
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write_prefixed_bytes(self)
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append_prefixed_bytes(self)
     }
 }
 
@@ -104,20 +101,20 @@ impl Layout for &[u8] {
 
 impl Encode for &[u8] {
     #[inline]
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write(self)
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append(self)
     }
 
     #[inline]
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
-        e.write_prefixed_bytes(self)
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
+        e.append_prefixed_bytes(self)
     }
 }
 
 impl<'de> Decode<'de> for &'de [u8] {
     #[inline]
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        d.take(d.remaining())
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        Ok(payload)
     }
 }
 
@@ -128,18 +125,18 @@ impl<T> Layout for Vec<T> {
 }
 
 impl<T: Encode> Encode for Vec<T> {
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match T::LEN {
             // O(1): fixed-size elements need no per-element prefix.
-            n if n > 0 => {
-                e.write_prefixed_bounded(self.len().saturating_mul(n), |e| self.encode(e))
-            }
-            // No cheap estimate available — `write_prefixed` fallback, never recurse.
-            _ => e.write_prefixed(|e| self.encode(e)),
+            n if n > 0 => e.append_with_length_prefix_bounded(self.len().saturating_mul(n), |e| {
+                self.encode(e)
+            }),
+            // No cheap estimate available — `append_with_length_prefix` fallback, never recurse.
+            _ => e.append_with_length_prefix(|e| self.encode(e)),
         }
     }
 
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
         // Delegated to the element: fixed-width scalars override `encode_slice`
         // with one bulk write, everything else gets the loop (`codec.rs`).
         T::encode_slice(self, e)
@@ -147,30 +144,29 @@ impl<T: Encode> Encode for Vec<T> {
 }
 
 impl<'de, T: Decode<'de>> Decode<'de> for Vec<T> {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        // `auto` already consumed the outer prefix and constrained `d` to the
-        // exact payload region, so decode until it is exhausted.
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        // Raw position: the whole slice is the payload. In `auto` position the
+        // framework hands over exactly the prefix-declared bytes.
         match T::LEN {
             elem_len if elem_len > 0 => {
-                let remaining = d.remaining();
-                if !remaining.is_multiple_of(elem_len) {
-                    return Err(Error::MisalignedElements);
+                if !payload.len().is_multiple_of(elem_len) {
+                    return Err(Error::message_static("misaligned element payload"));
                 }
-                let count = remaining / elem_len;
+                let count = payload.len() / elem_len;
                 if count == 0 {
                     return Ok(Vec::new());
                 }
                 // Same delegation on the way in; a type that does not override
                 // `decode_slice` runs `T::decode` per value.
-                let vec = T::decode_slice(d, count)?;
+                let vec = T::decode_slice(payload, count)?;
                 debug_assert_eq!(vec.len(), count);
-                debug_assert_eq!(d.remaining(), 0, "element hook left bytes behind");
                 Ok(vec)
             }
             _ => {
+                let mut cur = payload;
                 let mut vec = Vec::new();
-                while d.remaining() > 0 {
-                    vec.push(T::decode_auto(d)?);
+                while !cur.is_empty() {
+                    vec.push(T::decode_auto(&mut cur)?);
                 }
                 Ok(vec)
             }
@@ -204,26 +200,29 @@ const fn array_len<T: Layout, const N: usize>() -> usize {
 }
 
 impl<T: Encode, const N: usize> Encode for [T; N] {
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match T::LEN {
-            n if n > 0 => e.write_prefixed_bounded(N.saturating_mul(n), |e| self.encode(e)),
-            _ => e.write_prefixed(|e| self.encode(e)),
+            n if n > 0 => {
+                e.append_with_length_prefix_bounded(N.saturating_mul(n), |e| self.encode(e))
+            }
+            _ => e.append_with_length_prefix(|e| self.encode(e)),
         }
     }
 
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
         T::encode_slice(self, e)
     }
 }
 
 impl<'de, T: Decode<'de>, const N: usize> Decode<'de> for [T; N] {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        let mut cur = payload;
         let mut arr: mem::MaybeUninit<[T; N]> = mem::MaybeUninit::uninit();
         let ptr = arr.as_mut_ptr() as *mut T;
         let mut initialized = 0;
         let result = (|| {
             for i in 0..N {
-                unsafe { ptr.add(i).write(T::decode_auto(d)?) };
+                unsafe { ptr.add(i).write(T::decode_auto(&mut cur)?) };
                 initialized += 1;
             }
             Ok(())
@@ -307,11 +306,11 @@ macro_rules! tuple_encode_raw {
 /// literal, whose elements Rust evaluates in order. The trailing comma keeps the
 /// 1-tuple a tuple instead of a parenthesised value.
 macro_rules! tuple_decode_raw {
-    ([$($val:expr),*] ; $d:ident ; $idx:tt $name:ident) => {
-        ($($val,)* $name::decode($d)?,)
+    ([$($val:expr),*] ; $cur:ident ; $idx:tt $name:ident) => {
+        ($($val,)* $name::decode($cur)?,)
     };
-    ([$($val:expr),*] ; $d:ident ; $idx:tt $name:ident, $($rest_idx:tt $rest:ident),+) => {
-        tuple_decode_raw!([$($val,)* $name::decode_auto($d)?] ; $d ; $($rest_idx $rest),+)
+    ([$($val:expr),*] ; $cur:ident ; $idx:tt $name:ident, $($rest_idx:tt $rest:ident),+) => {
+        tuple_decode_raw!([$($val,)* $name::decode_auto(&mut $cur)?] ; $cur ; $($rest_idx $rest),+)
     };
 }
 
@@ -327,23 +326,26 @@ macro_rules! impl_tuple {
         }
 
         impl<$($name: Encode),+> Encode for ($($name,)+) {
-            fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+            fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
                 tuple_encode_raw!(e, self; $($idx $name),+)
             }
 
-            fn encode_auto(&self, e: &mut Encoder<'_>) -> Result<()> {
+            fn encode_auto(&self, e: &mut Allocator<'_>) -> Result<()> {
                 $( self.$idx.encode_auto(e)?; )+
                 Ok(())
             }
         }
 
         impl<'de, $($name: Decode<'de>),+> Decode<'de> for ($($name,)+) {
-            fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-                Ok(tuple_decode_raw!([] ; d ; $($idx $name),+))
+            fn decode(__payload: &'de [u8]) -> Result<Self> {
+                // Intermediate members go through `auto`; the last one is raw,
+                // its length implied by the bytes that are left.
+                let mut __cur = __payload;
+                Ok(tuple_decode_raw!([] ; __cur ; $($idx $name),+))
             }
 
-            fn decode_auto(d: &mut Decoder<'de>) -> Result<Self> {
-                Ok(($( $name::decode_auto(d)?, )+))
+            fn decode_auto(__buf: &mut &'de [u8]) -> Result<Self> {
+                Ok(($( $name::decode_auto(__buf)?, )+))
             }
         }
     };

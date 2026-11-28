@@ -12,9 +12,9 @@
 //! `decode_auto`.
 //!
 //! Decoding delegates to `Vec<T>::decode`, which already derives the element
-//! count for fixed-size elements, rejects misaligned payloads with
-//! `Error::MisalignedElements`, and leaves the bulk-or-loop decision to the
-//! element's `decode_slice` hook. Each container is then built with `collect()`.
+//! count for fixed-size elements, rejects misaligned payloads with the
+//! "misaligned element payload" error, and leaves the bulk-or-loop decision to
+//! the element's `decode_slice` hook. Each container is then built with `collect()`.
 //!
 //! # Ordering is *not* a wire guarantee
 //!
@@ -35,9 +35,8 @@
 //! because those types live in `std`. The hasher is generic
 //! (`S: BuildHasher`), so `RandomState` works without `hashbrown`.
 
+use crate::allocator::Allocator;
 use crate::codec::{Decode, Encode, Layout};
-use crate::decoder::Decoder;
-use crate::encoder::Encoder;
 use crate::error::Result;
 
 use alloc::borrow::{Cow, ToOwned};
@@ -52,7 +51,7 @@ use std::hash::{BuildHasher, Hash};
 /// Write the raw payload of a sequence: no count, every element through `encode_auto`.
 fn encode_items<'a, T: Encode + 'a>(
     items: impl IntoIterator<Item = &'a T>,
-    e: &mut Encoder<'_>,
+    e: &mut Allocator<'_>,
 ) -> Result<()> {
     for item in items {
         item.encode_auto(e)?;
@@ -61,15 +60,17 @@ fn encode_items<'a, T: Encode + 'a>(
 }
 
 /// Shared `encode_with_prefix`: fixed-size elements take the O(1) reserve path,
-/// variable-size ones `Encoder::write_prefixed` — the same split as `Vec<T>`.
+/// variable-size ones `Allocator::append_with_length_prefix` — the same split as `Vec<T>`.
 fn encode_items_with_prefix<'a, T: Encode + 'a>(
     len: usize,
     items: impl IntoIterator<Item = &'a T>,
-    e: &mut Encoder<'_>,
+    e: &mut Allocator<'_>,
 ) -> Result<()> {
     match T::LEN {
-        n if n > 0 => e.write_prefixed_bounded(len.saturating_mul(n), |e| encode_items(items, e)),
-        _ => e.write_prefixed(|e| encode_items(items, e)),
+        n if n > 0 => {
+            e.append_with_length_prefix_bounded(len.saturating_mul(n), |e| encode_items(items, e))
+        }
+        _ => e.append_with_length_prefix(|e| encode_items(items, e)),
     }
 }
 
@@ -77,7 +78,7 @@ fn encode_items_with_prefix<'a, T: Encode + 'a>(
 /// no header of its own.
 fn encode_pairs<'a, K: Encode + 'a, V: Encode + 'a>(
     items: impl IntoIterator<Item = (&'a K, &'a V)>,
-    e: &mut Encoder<'_>,
+    e: &mut Allocator<'_>,
 ) -> Result<()> {
     for (k, v) in items {
         k.encode_auto(e)?;
@@ -89,13 +90,15 @@ fn encode_pairs<'a, K: Encode + 'a, V: Encode + 'a>(
 fn encode_pairs_with_prefix<'a, K: Encode + 'a, V: Encode + 'a>(
     len: usize,
     items: impl IntoIterator<Item = (&'a K, &'a V)>,
-    e: &mut Encoder<'_>,
+    e: &mut Allocator<'_>,
 ) -> Result<()> {
     // `(K, V)::LEN` is the sum of the members' lengths, or 0 when either is
     // variable — exactly the estimate `Vec<(K, V)>` would use.
     match <(K, V) as Layout>::LEN {
-        n if n > 0 => e.write_prefixed_bounded(len.saturating_mul(n), |e| encode_pairs(items, e)),
-        _ => e.write_prefixed(|e| encode_pairs(items, e)),
+        n if n > 0 => {
+            e.append_with_length_prefix_bounded(len.saturating_mul(n), |e| encode_pairs(items, e))
+        }
+        _ => e.append_with_length_prefix(|e| encode_pairs(items, e)),
     }
 }
 
@@ -106,7 +109,7 @@ impl<T> Layout for VecDeque<T> {
 }
 
 impl<T: Encode> Encode for VecDeque<T> {
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
         // A deque is two contiguous runs. Delegating each run to the element
         // keeps whatever the element offers — the scalars' bulk write, or the
         // per-element loop for everything else (`codec.rs`).
@@ -115,19 +118,21 @@ impl<T: Encode> Encode for VecDeque<T> {
         T::encode_slice(tail, e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         match T::LEN {
-            n if n > 0 => {
-                e.write_prefixed_bounded(self.len().saturating_mul(n), |e| self.encode(e))
-            }
-            _ => e.write_prefixed(|e| self.encode(e)),
+            n if n > 0 => e.append_with_length_prefix_bounded(self.len().saturating_mul(n), |e| {
+                self.encode(e)
+            }),
+            _ => e.append_with_length_prefix(|e| self.encode(e)),
         }
     }
 }
 
 impl<'de, T: Decode<'de>> Decode<'de> for VecDeque<T> {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        Ok(<Vec<T> as Decode<'de>>::decode(d)?.into_iter().collect())
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        Ok(<Vec<T> as Decode<'de>>::decode(payload)?
+            .into_iter()
+            .collect())
     }
 }
 
@@ -138,18 +143,20 @@ impl<T> Layout for LinkedList<T> {
 }
 
 impl<T: Encode> Encode for LinkedList<T> {
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_items(self.iter(), e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_items_with_prefix(self.len(), self.iter(), e)
     }
 }
 
 impl<'de, T: Decode<'de>> Decode<'de> for LinkedList<T> {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        Ok(<Vec<T> as Decode<'de>>::decode(d)?.into_iter().collect())
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        Ok(<Vec<T> as Decode<'de>>::decode(payload)?
+            .into_iter()
+            .collect())
     }
 }
 
@@ -162,18 +169,20 @@ macro_rules! impl_ordered_set {
         }
 
         impl<T: Encode + Ord> Encode for $ty<T> {
-            fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+            fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
                 encode_items(self.iter(), e)
             }
 
-            fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+            fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
                 encode_items_with_prefix(self.len(), self.iter(), e)
             }
         }
 
         impl<'de, T: Decode<'de> + Ord> Decode<'de> for $ty<T> {
-            fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-                Ok(<Vec<T> as Decode<'de>>::decode(d)?.into_iter().collect())
+            fn decode(payload: &'de [u8]) -> Result<Self> {
+                Ok(<Vec<T> as Decode<'de>>::decode(payload)?
+                    .into_iter()
+                    .collect())
             }
         }
     };
@@ -189,18 +198,18 @@ impl<K, V> Layout for BTreeMap<K, V> {
 }
 
 impl<K: Encode + Ord, V: Encode> Encode for BTreeMap<K, V> {
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_pairs(self.iter(), e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_pairs_with_prefix(self.len(), self.iter(), e)
     }
 }
 
 impl<'de, K: Decode<'de> + Ord, V: Decode<'de>> Decode<'de> for BTreeMap<K, V> {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        Ok(<Vec<(K, V)> as Decode<'de>>::decode(d)?
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        Ok(<Vec<(K, V)> as Decode<'de>>::decode(payload)?
             .into_iter()
             .collect())
     }
@@ -215,19 +224,21 @@ impl<T, S> Layout for HashSet<T, S> {
 
 #[cfg(feature = "std")]
 impl<T: Encode + Eq + Hash, S: BuildHasher> Encode for HashSet<T, S> {
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_items(self.iter(), e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_items_with_prefix(self.len(), self.iter(), e)
     }
 }
 
 #[cfg(feature = "std")]
 impl<'de, T: Decode<'de> + Eq + Hash, S: BuildHasher + Default> Decode<'de> for HashSet<T, S> {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        Ok(<Vec<T> as Decode<'de>>::decode(d)?.into_iter().collect())
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        Ok(<Vec<T> as Decode<'de>>::decode(payload)?
+            .into_iter()
+            .collect())
     }
 }
 
@@ -238,11 +249,11 @@ impl<K, V, S> Layout for HashMap<K, V, S> {
 
 #[cfg(feature = "std")]
 impl<K: Encode + Eq + Hash, V: Encode, S: BuildHasher> Encode for HashMap<K, V, S> {
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_pairs(self.iter(), e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         encode_pairs_with_prefix(self.len(), self.iter(), e)
     }
 }
@@ -251,8 +262,8 @@ impl<K: Encode + Eq + Hash, V: Encode, S: BuildHasher> Encode for HashMap<K, V, 
 impl<'de, K: Decode<'de> + Eq + Hash, V: Decode<'de>, S: BuildHasher + Default> Decode<'de>
     for HashMap<K, V, S>
 {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        Ok(<Vec<(K, V)> as Decode<'de>>::decode(d)?
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        Ok(<Vec<(K, V)> as Decode<'de>>::decode(payload)?
             .into_iter()
             .collect())
     }
@@ -274,15 +285,15 @@ impl<'a, B> Encode for Cow<'a, B>
 where
     B: Encode + ToOwned + ?Sized,
 {
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<()> {
         <B as Encode>::encode(&**self, e)
     }
 
-    fn encode_with_prefix(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_with_prefix(&self, e: &mut Allocator<'_>) -> Result<()> {
         <B as Encode>::encode_with_prefix(&**self, e)
     }
 
-    fn encode_auto(&self, e: &mut Encoder<'_>) -> Result<()> {
+    fn encode_auto(&self, e: &mut Allocator<'_>) -> Result<()> {
         <B as Encode>::encode_auto(&**self, e)
     }
 }
@@ -295,7 +306,7 @@ where
     B: Layout + ToOwned + ?Sized,
     B::Owned: Decode<'de>,
 {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self> {
-        Ok(Cow::Owned(<B::Owned as Decode<'de>>::decode(d)?))
+    fn decode(payload: &'de [u8]) -> Result<Self> {
+        Ok(Cow::Owned(<B::Owned as Decode<'de>>::decode(payload)?))
     }
 }

@@ -5,7 +5,7 @@ use core::fmt;
 
 use crate::hex::Hex;
 
-/// Payload length up to which the `write_prefixed` path compacts its 4-byte
+/// Payload length up to which the `append_with_length_prefix` path compacts its 4-byte
 /// header into a 1-byte one. Above this the 4-byte header is kept as-is.
 ///
 /// Not a free parameter — C# and C++ use the same limit — and deliberately not
@@ -13,7 +13,7 @@ use crate::hex::Hex;
 /// decision into a semver commitment.
 pub(crate) const PREFIX_SHRINK_LIMIT: usize = 16;
 
-/// How many bytes an owned encoder commits (zero-fills) up front, capped by the
+/// How many bytes an owned allocator commits (zero-fills) up front, capped by the
 /// capacity the caller asked for.
 ///
 /// `Vec::len` is a *watermark*, not the write position: only `pos` says what has
@@ -41,7 +41,7 @@ const BULK_WRITE_MIN: usize = 256;
 /// # Safety
 ///
 /// Callers must prove `src + 8` and `dst + 8` are inside `slice` (done by
-/// `Encoder::ensure_prefix_tail`). No alignment is required.
+/// `Allocator::ensure_prefix_tail`). No alignment is required.
 #[inline]
 unsafe fn move_u64(slice: &mut [u8], src: usize, dst: usize) {
     let ptr = slice.as_mut_ptr();
@@ -49,11 +49,11 @@ unsafe fn move_u64(slice: &mut [u8], src: usize, dst: usize) {
     core::ptr::write_unaligned(ptr.add(dst).cast::<u64>(), word);
 }
 
-/// Single concrete encoder type with two backends.
+/// Single concrete allocator type with two backends.
 ///
 /// - `Owned`: self-growing `Vec<u8>`
 /// - `Borrowed`: writes into caller-provided `&mut [u8]`, error on overflow
-pub struct Encoder<'a> {
+pub struct Allocator<'a> {
     inner: Inner<'a>,
     pos: usize,
 }
@@ -63,18 +63,18 @@ enum Inner<'a> {
     Borrowed(&'a mut [u8]),
 }
 
-impl<'a> Encoder<'a> {
-    /// Create an owned encoder with a small initial capacity.
+impl<'a> Allocator<'a> {
+    /// Create an owned allocator with a small initial capacity.
     ///
     /// No `impl Default` on purpose: the one pattern that would need it
-    /// (`mem::take` on a scratch encoder) is ruled out by `finish` consuming the
+    /// (`mem::take` on a scratch allocator) is ruled out by `finish` consuming the
     /// buffer, and adding it later is non-breaking — hence the silenced lint.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self::with_capacity(256)
     }
 
-    /// Create an owned encoder with an initial capacity of `n` bytes.
+    /// Create an owned allocator with an initial capacity of `n` bytes.
     ///
     /// `n` is a budget the caller estimates, not a promise: writes past it still
     /// succeed, growing the `Vec` to what is needed. Construction is the only
@@ -94,7 +94,7 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// Create a borrowed encoder on a caller-provided slice.
+    /// Create a borrowed allocator on a caller-provided slice.
     /// Writes beyond the slice length return `Err(Error::BufferFull)`.
     pub fn on_slice(buf: &'a mut [u8]) -> Self {
         Self {
@@ -105,7 +105,7 @@ impl<'a> Encoder<'a> {
 
     /// Number of bytes written so far.
     ///
-    /// The only way to read the result of a **borrowed** encoder (`on_slice`),
+    /// The only way to read the result of a **borrowed** allocator (`on_slice`),
     /// where `finish` is unavailable. Deliberately the only such accessor:
     /// `is_empty` is not coming back, so the lint is silenced rather than
     /// answered with a second method.
@@ -117,7 +117,7 @@ impl<'a> Encoder<'a> {
 
     /// Write raw bytes.
     #[inline]
-    pub fn write(&mut self, src: &[u8]) -> Result<()> {
+    pub fn append(&mut self, src: &[u8]) -> Result<()> {
         // Bulk payloads append into uninitialised spare capacity; the generic
         // path below grows with `Vec::resize`, i.e. zero-fills the bytes the
         // copy is about to overwrite (§19.15.17). Small writes keep the plain
@@ -149,14 +149,14 @@ impl<'a> Encoder<'a> {
     /// Write `[prefix(len)] [bytes]`, reserving both with a single capacity check.
     ///
     /// Used by member names, and by values whose length is already exact —
-    /// `String` / `str` / `[u8]`. `write_prefixed_bounded` would re-enter
+    /// `String` / `str` / `[u8]`. `append_with_length_prefix_bounded` would re-enter
     /// `ensure_capacity` and re-read `pos` around the payload, which is ~2.8 ns
     /// per member on a short string (§19.15.11).
     ///
     /// The 1-byte-header arm is the only one inlined; `>127` goes out of line,
     /// which measured faster where this is inlined into every write site.
     #[inline]
-    pub(crate) fn write_prefixed_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn append_prefixed_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         let at = self.pos;
         let len = bytes.len();
         if len <= crate::length::SINGLE_BYTE_MAX {
@@ -167,26 +167,26 @@ impl<'a> Encoder<'a> {
             self.pos = at + 1 + len;
             return Ok(());
         }
-        self.write_prefixed_bytes_wide(at, bytes)
+        self.append_prefixed_bytes_wide(at, bytes)
     }
 
-    /// The >127-byte arm of [`Encoder::write_prefixed_bytes`]: four-byte
+    /// The >127-byte arm of [`Allocator::append_prefixed_bytes`]: four-byte
     /// big-endian header with bit 31 set, width fixed even when the length would
     /// fit in one byte (the caller decided the width from the same `len`).
     #[cold]
     #[inline(never)]
-    fn write_prefixed_bytes_wide(&mut self, at: usize, bytes: &[u8]) -> Result<()> {
+    fn append_prefixed_bytes_wide(&mut self, at: usize, bytes: &[u8]) -> Result<()> {
         // Header first, payload through the bulk path: a 4-byte reservation is
         // worth a zero-fill, the payload is not (§19.15.17).
         self.ensure_capacity(4)?;
         encode_prefix_wide(&mut self.as_mut_slice()[at..at + 4], bytes.len())?;
         self.pos = at + 4;
-        self.write(bytes)
+        self.append(bytes)
     }
 
     /// Ensure at least `additional` bytes are available at the current position.
     #[inline]
-    fn ensure_capacity(&mut self, additional: usize) -> Result<()> {
+    pub(crate) fn ensure_capacity(&mut self, additional: usize) -> Result<()> {
         match &mut self.inner {
             Inner::Owned(v) => {
                 let needed = self.pos + additional;
@@ -226,7 +226,7 @@ impl<'a> Encoder<'a> {
 
     /// Get a mutable view of the backing buffer up to its current allocated length.
     #[inline]
-    fn as_mut_slice(&mut self) -> &mut [u8] {
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
         match &mut self.inner {
             Inner::Owned(v) => &mut v[..],
             Inner::Borrowed(buf) => buf,
@@ -238,10 +238,10 @@ impl<'a> Encoder<'a> {
     /// actual byte count is written back into it afterwards, so there is no
     /// memmove. `f` may write fewer than `max_len` bytes.
     ///
-    /// Unlike `write_prefixed`, this needs an estimate rather than the exact
+    /// Unlike `append_with_length_prefix`, this needs an estimate rather than the exact
     /// length. `max_len` is a bound, not a reservation: `f` writes into **this**
-    /// encoder right after the header, so an over-estimate costs no memory and a
-    /// borrowed encoder is charged only for the bytes actually written. Safety
+    /// allocator right after the header, so an over-estimate costs no memory and a
+    /// borrowed allocator is charged only for the bytes actually written. Safety
     /// needs no bounded window, because every write inside `f` goes through
     /// `ensure_capacity`, which either grows the owned tail or stops at the
     /// caller's slice end with [`Error::BufferFull`].
@@ -255,10 +255,10 @@ impl<'a> Encoder<'a> {
     /// is terminal — the header is left unfilled, so the bytes after the anchor
     /// are not a member. Rolling `pos` back was measured at ~2 ns per call
     /// (§19.15.10).
-    pub fn write_prefixed_bounded(
+    pub fn append_with_length_prefix_bounded(
         &mut self,
         max_len: usize,
-        f: impl FnOnce(&mut Encoder<'_>) -> Result<()>,
+        f: impl FnOnce(&mut Allocator<'_>) -> Result<()>,
     ) -> Result<()> {
         // Out of line: the message must not join the hot path, and an estimate
         // smaller than the payload is a caller bug rather than data.
@@ -266,7 +266,7 @@ impl<'a> Encoder<'a> {
         #[inline(never)]
         fn overshoot() -> Error {
             Error::message_static(
-                "payload exceeds the length bound given to write_prefixed_bounded",
+                "payload exceeds the length bound given to append_with_length_prefix_bounded",
             )
         }
 
@@ -280,7 +280,7 @@ impl<'a> Encoder<'a> {
         self.ensure_capacity(h)?;
         self.pos = at + h;
 
-        // Reborrow, not a wrapper: `f` gets this encoder and its backend.
+        // Reborrow, not a wrapper: `f` gets this allocator and its backend.
         f(&mut *self)?;
 
         let actual = self.pos - at - h;
@@ -313,7 +313,10 @@ impl<'a> Encoder<'a> {
     /// supply that margin, the 4-byte header is kept — one arm, not two, like C#
     /// `Allocator.FinishAnchor`. Both widths are valid wire, so neither case is
     /// an error. The threshold is `PREFIX_SHRINK_LIMIT`.
-    pub fn write_prefixed(&mut self, f: impl FnOnce(&mut Encoder<'_>) -> Result<()>) -> Result<()> {
+    pub fn append_with_length_prefix(
+        &mut self,
+        f: impl FnOnce(&mut Allocator<'_>) -> Result<()>,
+    ) -> Result<()> {
         let anchor = self.pos;
 
         // Reserve 4 bytes (max possible prefix) as placeholder. Zeroing it is
@@ -326,8 +329,8 @@ impl<'a> Encoder<'a> {
         f(self)?;
 
         let actual = self.pos - anchor - 4;
-        // Release-safe counterpart of the `write_prefixed_bounded` guard: the
-        // payload is already written, so the encoder is left in an unspecified
+        // Release-safe counterpart of the `append_with_length_prefix_bounded` guard: the
+        // payload is already written, so the allocator is left in an unspecified
         // state. Every caller treats an error as terminal.
         if actual > crate::length::MAX_LENGTH {
             return Err(Error::LengthTooLarge);
@@ -368,15 +371,15 @@ impl<'a> Encoder<'a> {
         Ok(())
     }
 
-    /// Consume the encoder and return the written bytes.
-    /// Only available for owned encoders.
+    /// Consume the allocator and return the written bytes.
+    /// Only available for owned allocators.
     pub fn finish(self) -> Result<Vec<u8>> {
         match self.inner {
             Inner::Owned(mut v) => {
                 v.truncate(self.pos);
                 Ok(v)
             }
-            Inner::Borrowed(_) => Err(Error::message_static("cannot finish a borrowed encoder")),
+            Inner::Borrowed(_) => Err(Error::message_static("cannot finish a borrowed allocator")),
         }
     }
 
@@ -388,42 +391,18 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// Write a *compact integer*: 1 byte when `v <= 127`, otherwise 4 bytes
-    /// big-endian with bit 31 set.
-    ///
-    /// Wire-identical to a length prefix by design — the same bytes a prefix of
-    /// that length would produce. Used for union / variant tags, so a tag stays
-    /// cheap for the first 128 variants and still covers `i32::MAX` variants.
-    ///
-    /// Directly comparable with [`crate::Encode`] for `usize`: a `usize` writes
-    /// 8 fixed bytes, a compact integer writes 1 or 4.
+    /// Advance the write position by `n` bytes already written into the
+    /// backing buffer through [`Self::as_mut_slice`]. Internal step of
+    /// [`crate::encode`], which reserves via [`Self::ensure_capacity`] and
+    /// writes the compact-int header by hand.
     #[inline]
-    pub fn write_compact_int(&mut self, v: u32) -> Result<()> {
-        // Release-safe guard, same class as `write_prefixed_bounded`:
-        // `v | 0x8000_0000` keeps bit 31 as *data* for values above `i32::MAX`,
-        // and the decoder masks that bit away, so the value would change
-        // silently. Nothing is written before the check.
-        if v as usize > crate::length::MAX_LENGTH {
-            return Err(Error::LengthTooLarge);
-        }
-        let h = prefix_header_len(v as usize);
-        self.ensure_capacity(h)?;
-        let pos = self.pos;
-        {
-            let slice = self.as_mut_slice();
-            if h == 1 {
-                slice[pos] = v as u8;
-            } else {
-                encode_prefix_wide(&mut slice[pos..pos + 4], v as usize)?;
-            }
-        }
-        self.pos = pos + h;
-        Ok(())
+    pub(crate) fn advance(&mut self, n: usize) {
+        self.pos += n;
     }
 
     /// Write a single byte.
     #[inline]
-    pub fn write_byte(&mut self, b: u8) -> Result<()> {
+    pub fn append_byte(&mut self, b: u8) -> Result<()> {
         self.ensure_capacity(1)?;
         let pos = self.pos;
         self.as_mut_slice()[pos] = b;
@@ -432,14 +411,14 @@ impl<'a> Encoder<'a> {
     }
 }
 
-impl fmt::Debug for Encoder<'_> {
+impl fmt::Debug for Allocator<'_> {
     /// Prints the backend, how much is written, and a capped hex dump of the
     /// bytes so far.
     ///
     /// Derived `Debug` would dump the whole `Vec<u8>` — including the reserved
     /// tail that is not part of the result.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut s = f.debug_struct("Encoder");
+        let mut s = f.debug_struct("Allocator");
         match &self.inner {
             Inner::Owned(v) => {
                 s.field("backend", &"owned");

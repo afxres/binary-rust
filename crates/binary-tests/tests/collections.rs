@@ -2,20 +2,20 @@
 //! through `auto`. See `binary::collections` module docs and `DESIGN.md` §17.3
 //! for the three-way wire argument and the ordering caveat.
 
-use binary::{from_slice, to_vec, write_named_member, Encode, Encoder, Error, Layout};
+use binary::{from_slice, to_vec, write_named_member, Allocator, Encode, Layout};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};
 use std::hash::BuildHasherDefault;
 
 fn raw<T: Encode + ?Sized>(v: &T) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     v.encode(&mut e).unwrap();
     e.finish().unwrap()
 }
 
 fn named_bytes<T: Encode + ?Sized>(v: &T) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     write_named_member(&mut e, b"x", v).unwrap();
     e.finish().unwrap()
 }
@@ -88,7 +88,7 @@ fn test_linked_list_and_ordered_sets_match_vec() {
 
 #[test]
 fn test_maps_match_vec_of_pairs() {
-    // Fixed-size values: both sides take the O(1) `write_prefixed_bounded` path with
+    // Fixed-size values: both sides take the O(1) `append_with_length_prefix_bounded` path with
     // `(i32, i32)::LEN == 8`.
     let map = BTreeMap::from([(1i32, 10i32), (2, 20), (3, 30)]);
     let pairs = vec![(1i32, 10i32), (2, 20), (3, 30)];
@@ -100,7 +100,7 @@ fn test_maps_match_vec_of_pairs() {
         map
     );
 
-    // Variable-size values: both sides take the `write_prefixed` path, and the pair
+    // Variable-size values: both sides take the `append_with_length_prefix` path, and the pair
     // itself contributes no header (K auto, V auto).
     let var_map = BTreeMap::from([(1i32, "a".to_string()), (2, "longer".to_string())]);
     let var_pairs: Vec<(i32, String)> = var_map.iter().map(|(k, v)| (*k, v.clone())).collect();
@@ -229,16 +229,18 @@ fn test_misaligned_payload_is_rejected() {
     // 5 bytes cannot be a whole number of 4-byte elements.
     let bytes = [1u8, 2, 3, 4, 5];
     assert_eq!(
-        from_slice::<BTreeSet<i32>>(&bytes),
-        Err(Error::MisalignedElements)
+        from_slice::<BTreeSet<i32>>(&bytes).unwrap_err().to_string(),
+        "misaligned element payload"
     );
     assert_eq!(
-        from_slice::<VecDeque<i32>>(&bytes),
-        Err(Error::MisalignedElements)
+        from_slice::<VecDeque<i32>>(&bytes).unwrap_err().to_string(),
+        "misaligned element payload"
     );
     assert_eq!(
-        from_slice::<BTreeMap<i16, i16>>(&bytes),
-        Err(Error::MisalignedElements)
+        from_slice::<BTreeMap<i16, i16>>(&bytes)
+            .unwrap_err()
+            .to_string(),
+        "misaligned element payload"
     );
 }
 
@@ -270,7 +272,7 @@ fn test_round_trip_all_container_shapes() {
 #[test]
 fn test_variable_size_elements_take_the_compacting_header() {
     // `encode_items_with_prefix` has two arms: fixed-size elements reserve the
-    // exact payload, variable-size ones go through `write_prefixed`. The tests
+    // exact payload, variable-size ones go through `append_with_length_prefix`. The tests
     // above only reached the first, so pin the second for every container that
     // shares the helper, plus the `VecDeque` override.
     let list: LinkedList<String> = ["one", "two"].iter().map(|s| s.to_string()).collect();

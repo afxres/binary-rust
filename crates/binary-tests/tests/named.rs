@@ -4,8 +4,7 @@
 //! required `id` / `name`, plus an optional `age` that is omitted when default.
 
 use binary::{
-    read_named_member, write_named_member, Decode, Decoder, Encode, Encoder, Error, Layout,
-    NamedMembers,
+    read_named_member, write_named_member, Allocator, Decode, Encode, Error, Layout, NamedMembers,
 };
 
 mod common;
@@ -27,9 +26,9 @@ impl Layout for Person {
 
 impl Encode for Person {
     // No length prediction: the default `encode_with_prefix` uses
-    // `Encoder::write_prefixed` for the object, while each member's value still
+    // `Allocator::append_with_length_prefix` for the object, while each member's value still
     // takes the O(1) precise path (fixed-size `LEN`, or `String::len()`).
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<(), Error> {
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<(), Error> {
         write_named_member(e, b"id", &self.id)?;
         write_named_member(e, b"name", &self.name)?;
         if self.age != 0 {
@@ -49,8 +48,8 @@ fn find_member(name: &[u8]) -> Option<usize> {
 }
 
 impl<'de> Decode<'de> for Person {
-    fn decode(d: &mut Decoder<'de>) -> Result<Self, Error> {
-        let m = NamedMembers::<3>::parse(d, find_member)?;
+    fn decode(payload: &'de [u8]) -> Result<Self, Error> {
+        let m = NamedMembers::<3>::parse(payload, find_member)?;
         Ok(Person {
             id: m.value(0, "id")?,
             name: m.value(1, "name")?,
@@ -68,14 +67,14 @@ fn person() -> Person {
 }
 
 fn encode_auto(p: &Person) -> Vec<u8> {
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     p.encode_auto(&mut e).unwrap();
     e.finish().unwrap()
 }
 
 fn decode_auto(bytes: &[u8]) -> Person {
-    let mut d = Decoder::new(bytes);
-    Person::decode_auto(&mut d).unwrap()
+    let mut buf = bytes;
+    Person::decode_auto(&mut buf).unwrap()
 }
 
 /// Rebuild a length-prefixed object with extra bytes inserted at the front of
@@ -129,8 +128,11 @@ fn test_named_duplicate_member() {
     repeated.extend_from_slice(&payload[..8]);
     let out = with_header(&repeated);
 
-    let mut d = Decoder::new(&out);
-    assert_eq!(Person::decode_auto(&mut d), Err(Error::DuplicateMember));
+    let mut buf: &[u8] = &out;
+    assert_eq!(
+        Person::decode_auto(&mut buf).unwrap_err().to_string(),
+        "duplicate named member"
+    );
 }
 
 #[test]
@@ -139,8 +141,11 @@ fn test_named_missing_required() {
     let payload = [0x04, b'n', b'a', b'm', b'e', 0x03, b'B', b'o', b'b'];
     let out = with_header(&payload);
 
-    let mut d = Decoder::new(&out);
-    assert_eq!(Person::decode_auto(&mut d), Err(Error::MissingMember("id")));
+    let mut buf: &[u8] = &out;
+    assert_eq!(
+        Person::decode_auto(&mut buf).unwrap_err().to_string(),
+        "missing required member: id"
+    );
 }
 
 #[test]
@@ -222,7 +227,7 @@ fn test_named_long_value_4byte_prefix() {
 fn test_named_long_name_4byte_prefix() {
     // A member *name* over 127 bytes keeps a 4-byte prefix, same rule as a long
     // value. Pinned here because the name is now written by one reservation
-    // (`Encoder::write_prefixed_bytes`) rather than two `write` calls, and the
+    // (`Allocator::append_prefixed_bytes`) rather than two `write` calls, and the
     // prefix width has to stay a function of the name length, not of the buffer.
     struct LongName;
 
@@ -231,13 +236,13 @@ fn test_named_long_name_4byte_prefix() {
     }
 
     impl Encode for LongName {
-        fn encode(&self, e: &mut Encoder<'_>) -> Result<(), Error> {
+        fn encode(&self, e: &mut Allocator<'_>) -> Result<(), Error> {
             let name = "n".repeat(200);
             write_named_member(e, name.as_bytes(), &7i32)
         }
     }
 
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     LongName.encode(&mut e).unwrap();
     let bytes = e.finish().unwrap();
 
@@ -255,15 +260,15 @@ fn test_read_named_member_pairs_name_with_raw_payload() {
     // The read half of `write_named_member`: both prefixes are consumed by one
     // call, and the payload comes back without its prefix, so a slot is decoded
     // with `T::decode` and not `auto`.
-    let mut e = Encoder::new();
+    let mut e = Allocator::new();
     write_named_member(&mut e, b"id", &7i32).unwrap();
     let bytes = e.finish().unwrap();
 
-    let mut d = Decoder::new(&bytes);
-    let (name, payload) = read_named_member(&mut d).unwrap();
+    let mut buf: &[u8] = &bytes;
+    let (name, payload) = read_named_member(&mut buf).unwrap();
     assert_eq!(name, b"id");
     assert_eq!(payload, &7i32.to_le_bytes()[..]);
-    assert_eq!(d.remaining(), 0);
+    assert_eq!(buf.len(), 0);
 }
 
 #[test]
@@ -278,8 +283,8 @@ fn test_named_truncated_member() {
     // A name header with no value prefix behind it.
     let payload = [0x02, b'i', b'd'];
     let out = with_header(&payload);
-    let mut d = Decoder::new(&out);
-    assert_eq!(Person::decode_auto(&mut d), Err(Error::NotEnoughBytes));
+    let mut buf: &[u8] = &out;
+    assert_eq!(Person::decode_auto(&mut buf), Err(Error::NotEnoughBytes));
 }
 
 struct Opaque(Vec<u8>);
@@ -289,31 +294,29 @@ impl Layout for Opaque {
 }
 
 impl Encode for Opaque {
-    fn encode(&self, e: &mut Encoder<'_>) -> Result<(), Error> {
-        e.write(&self.0)
+    fn encode(&self, e: &mut Allocator<'_>) -> Result<(), Error> {
+        e.append(&self.0)
     }
 }
 
 #[test]
-fn test_named_write_prefixed_path() {
-    // Both the object and its member fall back to the `write_prefixed` path.
-    let mut e = Encoder::new();
-    e.write_prefixed(|e| write_named_member(e, b"blob", &Opaque(vec![1, 2, 3])))
+fn test_named_append_with_length_prefix_path() {
+    // Both the object and its member fall back to the prefixed path.
+    let mut e = Allocator::new();
+    e.append_with_length_prefix(|e| write_named_member(e, b"blob", &Opaque(vec![1, 2, 3])))
         .unwrap();
     let bytes = e.finish().unwrap();
 
     // payload = prefix("blob") "blob" (5) + prefix([1,2,3]) (1) + 3 = 9
     assert_eq!(bytes[0], 9);
 
-    let mut d = Decoder::new(&bytes);
-    let value: Vec<u8> = d
-        .with_prefix(|d| {
-            let m = NamedMembers::<1>::parse(d, |n| match n {
-                b"blob" => Some(0),
-                _ => None,
-            })?;
-            Ok(m.require(0, "blob")?.to_vec())
-        })
-        .unwrap();
+    let mut buf: &[u8] = &bytes;
+    let payload = binary::decode_with_length_prefix(&mut buf).unwrap();
+    let m = NamedMembers::<1>::parse(payload, |n| match n {
+        b"blob" => Some(0),
+        _ => None,
+    })
+    .unwrap();
+    let value: Vec<u8> = m.value(0, "blob").unwrap();
     assert_eq!(value, vec![1, 2, 3]);
 }

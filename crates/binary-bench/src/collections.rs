@@ -10,7 +10,7 @@
 //! reused across iterations, `min` over 7 rounds of 50 ms, `black_box` on every
 //! result.
 
-use binary::{Decode, Decoder, Encode, Encoder, Layout};
+use binary::{Allocator, Decode, Encode, Layout};
 
 use crate::harness::{bench, bench_ret, header};
 
@@ -29,8 +29,8 @@ impl Layout for LoopI32 {
 }
 
 impl Encode for LoopI32 {
-    fn encode(&self, e: &mut Encoder<'_>) -> binary::Result<()> {
-        e.write(&self.0.to_le_bytes())
+    fn encode(&self, e: &mut Allocator<'_>) -> binary::Result<()> {
+        e.append(&self.0.to_le_bytes())
     }
 }
 
@@ -39,14 +39,14 @@ impl Encode for LoopI32 {
 /// else, which is the same shape as C# `EnumerableConverter` and C++
 /// `ContainerConverter`.
 fn encode_into<T: Encode>(value: &T, buf: &mut [u8]) -> usize {
-    let mut e = Encoder::on_slice(buf);
+    let mut e = Allocator::on_slice(buf);
     value.encode_auto(&mut e).expect("8 KiB is enough");
     e.len()
 }
 
 fn decode_from<'a, T: Decode<'a>>(bytes: &'a [u8]) -> T {
-    let mut d = Decoder::new(bytes);
-    T::decode_auto(&mut d).expect("round-tripped above")
+    let mut buf = bytes;
+    T::decode_auto(&mut buf).expect("round-tripped above")
 }
 
 pub fn run() {

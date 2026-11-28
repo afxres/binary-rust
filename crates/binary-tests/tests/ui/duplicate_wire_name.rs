@@ -1,5 +1,5 @@
 // Two members cannot share a wire name: encode would emit it twice and decode
-// would report `DuplicateMember` on the second occurrence.
+// would report a duplicate named-member error on the second occurrence.
 use binary::{Decode, Encode};
 
 #[derive(Encode, Decode)]

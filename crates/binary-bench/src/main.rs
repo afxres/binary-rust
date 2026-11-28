@@ -1,4 +1,4 @@
-//! Local benchmark harness (DESIGN §18.8 / §9 item 5).
+//! Local benchmark harness (DESIGN §18 / §9 item 5).
 //!
 //! Hand-rolled and dependency-free on purpose: the numbers have to be comparable
 //! with google benchmark (C++) and a stopwatch loop (C#), and criterion's
